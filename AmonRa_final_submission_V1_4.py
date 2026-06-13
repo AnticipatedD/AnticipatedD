@@ -1,4 +1,4 @@
-```markdown
+```
 # AmonRa_final_submission_V1_4
 
 This repository contains a single script `AmonRa_final_submission_V1_4.py` that computes the contest prize function
