@@ -326,8 +326,77 @@ if __name__ == "__main__":
     except Exception as e:
         logger.error("Unhandled exception: %s", e)
         sys.exit(2)
-```
 
+$ python runner.py AmonRa_final_submission_v1_4 and call when --gauge-fix is requested:
+```
+# utils/novelty.py
+import numpy as np
+import pandas as pd
+
+def latlon_to_unit(lat_deg, lon_deg):
+    """Convert degrees to 3D unit vector (float32)."""
+    lat = np.deg2rad(lat_deg.astype(np.float32))
+    lon = np.deg2rad(lon_deg.astype(np.float32))
+    cx = np.cos(lat) * np.cos(lon)
+    cy = np.cos(lat) * np.sin(lon)
+    cz = np.sin(lat)
+    return np.stack([cx, cy, cz], axis=1).astype(np.float32)
+
+def load_existing_cities(parquet_path="data/signal_cities.parquet"):
+    """
+    Load existing city coordinates.
+    Accepts either columns ['x','y','z'] (unit vectors) or ['lat','lon'] in degrees.
+    Returns ndarray shape (N,3), dtype float32, normalized to unit length.
+    """
+    df = pd.read_parquet(parquet_path)
+    if set(['x','y','z']).issubset(df.columns):
+        arr = df[['x','y','z']].to_numpy(dtype=np.float32)
+    elif set(['lat','lon']).issubset(df.columns):
+        arr = latlon_to_unit(df['lat'].to_numpy(), df['lon'].to_numpy())
+    else:
+        raise ValueError("Unexpected schema in signal_cities.parquet. Expect ['x','y','z'] or ['lat','lon'].")
+    # normalize (safety)
+    norms = np.linalg.norm(arr, axis=1, keepdims=True)
+    norms = np.maximum(norms, 1e-12).astype(np.float32)
+    return (arr / norms).astype(np.float32)
+
+def check_novelty(your_city_vec, existing_cities, threshold_dot=0.5, verbose=True):
+    """
+    your_city_vec: array-like shape (3,) or (1,3) -- can be lat/lon (tuple) or vector.
+    existing_cities: ndarray (N,3) unit vectors.
+    threshold_dot: default 0.5 corresponds to 60 degrees (cos 60 = 0.5).
+    Returns: dict with keys: pass (bool), max_dot, min_angle_deg, nearest_index, n_within_threshold
+    """
+    u = np.asarray(your_city_vec, dtype=np.float32).reshape(3,)
+    # if input is lat/lon pair: detect by magnitude > 1.2 or < -1.2; but prefer explicit call.
+    if np.linalg.norm(u) < 1.5:  # assume vector already or lat/lon in degrees would be large magnitudes -> ambiguous
+        # normalize vector
+        un = u / max(np.linalg.norm(u), 1e-12)
+    else:
+        # unlikely branch; prefer user to pass a unit vector or lat/lon externally
+        un = u / max(np.linalg.norm(u), 1e-12)
+    # vectorized dot product (fast)
+    dots = existing_cities.astype(np.float32).dot(un.astype(np.float32))
+    # numerical safety
+    dots = np.clip(dots, -1.0, 1.0)
+    max_dot = float(dots.max())
+    nearest_idx = int(dots.argmax())
+    # Only compute angle for the nearest item (cheap)
+    min_angle_deg = float(np.degrees(np.arccos(max_dot)))
+    # count how many existing cities are closer than threshold (dot > threshold_dot)
+    n_close = int((dots > threshold_dot).sum())
+
+    result = {
+        "pass": max_dot <= float(threshold_dot),
+        "max_dot": max_dot,
+        "min_angle_deg": min_angle_deg,
+        "nearest_index": nearest_idx,
+        "n_within_threshold": n_close
+    }
+    if verbose:
+        status = "PASS" if result["pass"] else "FAIL"
+        print(f"[novelty] {status} | nearest idx={nearest_idx} | angle={min_angle_deg:.3f}° | dot={max_dot:.6f} | n_within_60deg={n_close}")
+    return result
 ```
 # AmonRa_final_submission_V1_4
 
