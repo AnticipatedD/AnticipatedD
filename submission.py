@@ -1,5 +1,5 @@
 """
-AlphaNova Submission: submission.py
+AlphaNova Submission: amonRa_final_submission_V1_0.py
 ===================================
 Strategy: Multi-factor Cross-Sectional Signal (Momentum Dominant)
 Approach: Ensemble of momentum, mean-reversion, and quality signals
@@ -148,4 +148,102 @@ class Predictor:
 
 # Standalone execution guard to prevent root execution issues on server
 if __name__ == "__main__":
-    pass
+    pass 
+
+# /// script
+# dependencies = [
+#   "numpy",
+#   "pandas",
+#   "pyarrow",
+# ]
+# ///
+
+import numpy as np
+import pandas as pd
+from predictor import Predictor
+
+class AmonRaPredictor(Predictor):
+    """
+    amonRa_final_submission_V1_0.py
+    
+    Fixed AlphaNova Cross-Sectional Predictor.
+    - Fixes KeyError: Addresses multi-index levels by position (1), not by name.
+    - Fixes Shape Mismatch: Computes and returns a full (timestamps x assets)
+      DataFrame instead of collapsing to a single row.
+    - Typo Free: Corrected feature naming dictionaries.
+    """
+    def __init__(self):
+        self.weights = None
+        self.feature_names = []
+
+    def _engineer_features(self, df: pd.DataFrame, is_training: bool = False) -> pd.DataFrame:
+        tickers = df.columns.get_level_values(1).unique()
+        base_features = df.columns.get_level_values(0).unique()
+        engineered_dict = {}
+        
+        # 1. Cross-Sectional Ranks (Normalized between -0.5 and 0.5)
+        for feat in base_features:
+            feat_df = df[feat]
+            rank_df = feat_df.rank(axis=1, pct=True) - 0.5
+            engineered_dict[f"{feat}_cs_rank"] = rank_df
+            
+        # 2. Dimensional Cross-Asset Interactions
+        if "Feature.1" in base_features:
+            f1_rank = engineered_dict["Feature.1_cs_rank"]
+            for feat in base_features:
+                if feat != "Feature.1":
+                    feat_rank = df[feat].rank(axis=1, pct=True) - 0.5
+                    engineered_dict[f"interaction_Feature.1_{feat}"] = f1_rank * feat_rank
+
+        # Combine into long format tracking (timestamp, ticker)
+        long_dfs = []
+        for feat_name, feat_df in engineered_dict.items():
+            long_dfs.append(feat_df.stack(future_stack=True).rename(feat_name))
+            
+        engineered_df = pd.concat(long_dfs, axis=1).fillna(0.0)
+        
+        if is_training:
+            self.feature_names = engineered_df.columns.tolist()
+            
+        return engineered_df[self.feature_names]
+
+    def train(self, features: pd.DataFrame, target: pd.DataFrame):
+        X_df = self._engineer_features(features, is_training=True)
+        y_series = target.stack(future_stack=True).loc[X_df.index].fillna(0.0)
+        
+        X = X_df.to_numpy()
+        y = y_series.to_numpy()
+        
+        X_bias = np.hstack([np.ones((X.shape[0], 1)), X])
+        lambd = 10.0
+        I = np.eye(X_bias.shape[1])
+        I[0, 0] = 0.0
+        
+        try:
+            self.weights = np.linalg.solve(X_bias.T @ X_bias + lambd * I, X_bias.T @ y)
+        except np.linalg.LinAlgError:
+            self.weights = np.zeros(X_bias.shape[1])
+
+    def predict(self, features: pd.DataFrame) -> pd.DataFrame:
+        X_df = self._engineer_features(features, is_training=False)
+        X = X_df.to_numpy()
+        X_bias = np.hstack([np.ones((X.shape[0], 1)), X])
+        
+        if self.weights is None:
+            raw_preds = np.zeros(X.shape[0])
+        else:
+            raw_preds = X_bias @ self.weights
+            
+        pred_series = pd.Series(raw_preds, index=X_df.index)
+        preds_df = pred_series.unstack(level=1)
+        
+        # Mandatory Cross-Sectional De-meaning row by row
+        preds_df = preds_df.sub(preds_df.mean(axis=1), axis=0)
+        
+        required_tickers = features.columns.get_level_values(1).unique()
+        preds_df = preds_df.reindex(columns=required_tickers, fill_value=0.0)
+        
+        # Final safety de-mean
+        preds_df = preds_df.sub(preds_df.mean(axis=1), axis=0)
+        
+        return preds_df
