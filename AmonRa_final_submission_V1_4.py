@@ -1,7 +1,4 @@
-Objective
-Develop a cross-sectional signal P(i)=(P1(i),…,PJ(i))P(i)=(P1​(i),…,PJ​(i)) at each timestamp ii that forecasts the relative returns of JJ assets. The signal must be cross-sectionally de-meaned at every timestamp:
-Used outline a method for developing the signal, which includes several steps: identifying features, selecting a model, normalizing data, determining the training target based on relative returns, and establishing a loss function like ranking or MAE. Also, I have addressed scaling, missing data, and evaluated methods like IC and rank IC. It's important to backtest and consider regularization and constraints. I have provided equations in LaTeX and incorporate implementation details like minibatch processing and online updates.
-Good — here's a practical, production-ready blueprint (math + engineering) I have used to built a cross-sectionally de-meaned forecasting signal
+Here's a practical, production-ready blueprint (math + engineering) I have used to built a cross-sectionally de-meaned forecasting signal
 \(P(i)=\big(P_1(i),\dots,P_J(i)\big)\) at each timestamp \(i\) so that
 \(\sum_{j=1}^J P_j(i)=0\) for every \(i\). I included objectives, loss choices, preprocessing, implementation details for streaming/real-time production, evaluation metrics, and common pitfalls.
 
@@ -361,9 +358,7 @@ Equivalently, to test the 60° threshold use the dot product:
 \[
   \theta \ge 60^\circ \quad\Longleftrightarrow\quad u\cdot v \le \cos(60^\circ) = 0.5.
   \]
-
 So we can often avoid computing the expensive \(\arccos\) and just check whether the dot product is \(\le 0.5\).
-
 If city coordinates are given as latitude/longitude \((\phi,\lambda)\), convert to unit 3D vectors first:
 \[
 u=\begin{bmatrix}
@@ -372,59 +367,46 @@ u=\begin{bmatrix}
 \sin\phi
 \end{bmatrix},
 \]
-
 where \(\phi\) = latitude in radians and \(\lambda\) = longitude in radians.
-
 Python snippet — read Parquet, compute angular distances, report nearest
 (assumes cities are stored either as 3 columns x,y,z OR lat/lon; adapt if your schema differs)
-
-```python
+```
 import numpy as np
 import pandas as pd
 
 # Path to parquet
 path = "data/signal_cities.parquet"
 df = pd.read_parquet(path)
-
 # Inspect columns: either expect ['x','y','z'] as unit vectors or ['lat','lon'] in degrees
 print(df.columns)
-
 # Example: if df has 'x','y','z'
 if set(['x','y','z']).issubset(df.columns):
     existing = df[['x','y','z']].to_numpy(dtype=float)
     # ensure unit normalization (numerical safety)
     norms = np.linalg.norm(existing, axis=1, keepdims=True)
     existing = existing / np.maximum(norms, 1e-12)
-
 # Or if df has 'lat','lon' in degrees:
 elif set(['lat','lon']).issubset(df.columns):
     lat = np.deg2rad(df['lat'].to_numpy(dtype=float))
     lon = np.deg2rad(df['lon'].to_numpy(dtype=float))
     existing = np.column_stack([np.cos(lat)*np.cos(lon), np.cos(lat)*np.sin(lon), np.sin(lat)])
-else:
-    raise ValueError("Unexpected schema: expected ('x','y','z') or ('lat','lon').")
-
-# Your city: either as unit vector or lat/lon. Example: provide as unit vector:
+else 
+       raise ValueError("Unexpected schema: expected ('x','y','z') or ('lat','lon').")
+# My city: either as unit vector or lat/lon. Example: provide as unit vector:
 # Replace this with your actual city coordinates
-your_city = np.array([0.1, 0.9, 0.4], dtype=float)
-your_city = your_city / np.linalg.norm(your_city)
-
+my_city = np.array([0.1, 0.9, 0.4], dtype=float)
+my_city = my_city / np.linalg.norm(my_city)
 # Compute dot products with all existing cities
 dots = existing.dot(your_city)
-
 # Clip for numerical safety
 dots = np.clip(dots, -1.0, 1.0)
-
 # Angular distances in degrees (optional)
 angles_deg = np.degrees(np.arccos(dots))
-
 # Find nearest
 idx_min = np.argmin(angles_deg)
 min_angle = angles_deg[idx_min]
 min_dot = dots[idx_min]
-
 print(f"Nearest city index: {idx_min}, angular distance = {min_angle:.3f} deg, dot = {min_dot:.6f}")
-
 # Check 60 degree novelty criterion
 threshold_deg = 60.0
 ok = min_angle >= threshold_deg
@@ -433,17 +415,14 @@ if ok:
 else:
     print("Novelty check FAILED: nearest city closer than 60° (consider iterating).")
 
-# Optionally list all cities within 60 deg
+  # Optionally list all cities within 60 deg
 close_mask = angles_deg < threshold_deg
 print(f"{close_mask.sum()} existing cities are within {threshold_deg}°.")
 ```
-
 ```
-# AmonRa_final_submission_V1_4
-
+# AmonRa_final_submission_V1_4.py
 This repository contains a single script `AmonRa_final_submission_V1_4.py` that computes the contest prize function
 and provides CI-friendly test output.
-
 Prize definition (defaults):
 - \(U\): number of new users (non-negative integer)
 - \(Q\): number of quality signals (non-negative integer)
@@ -454,15 +433,13 @@ Prize definition (defaults):
   2000 + 48000\cdot (U\cdot Q)^{0.75}, & Q>0.
   \end{cases}
   \]
-
 Rounding: results are rounded to nearest dollar with "round half-up" semantics (ties of .5 round up).
-
 ## Files
 - `AmonRa_final_submission_V1_4.py` — main script containing implementations, CLI, and unit tests.
-- `README.md` — this file.
+
+  - `README.md` — this file.
 
 ## Usage
-
 Run interactively:
 ```bash
 python AmonRa_final_submission_V1_4.py 100 10
