@@ -2,6 +2,11 @@
 
 **Business | Offshore Architecture Engineer | Entrepreneur**
 
+### 📚 Academic Citation & Verified DOI
+This framework is officially registered and archived with the European Union open-access infrastructure:
+👉 **Official DOI:** [10.5281/zenodo.21301987](https://doi.org)
+
+
 🔗 **Support My Work:** [💰 Become a Sponsor](https://github.com/sponsors/AnticipatedD) | [☕ Open Collective](https://opencollective.com/vane-guard)
 
 Welcome to my GitHub profile! I'm a forward-thinking technology innovator and entrepreneur passionate about solving real-world problems through cutting-edge solutions in machine learning, cloud infrastructure, and mobile development.
