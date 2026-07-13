@@ -6,6 +6,26 @@ This document outlines exactly how every dollar from GitHub Sponsors and Open Co
 
 ---
 
+## 👤 Principal Author & Credentials
+
+**MD ABUL HOSSAIN** (Corporate Alias: Dante Vane)
+- **Title:** Founder & Chairman, Vane Enterprise LLC
+- **ORCID:** [0009-0004-4378-5298](https://orcid.org/0009-0004-4378-5298/)
+- **Research Focus:** Enterprise AI Safety, Hallucination Prevention, Zero-Trust RAG Pipeline Architecture
+- **Contact:** harigov63@gmail.com
+
+---
+
+## 💳 Support & Sponsorship
+
+**Sponsor this project and directly fund breakthrough AI safety research:**
+
+- **GitHub Sponsors:** [Sponsor MD ABUL HOSSAIN](https://github.com/sponsors/AnticipatedD)
+- **Open Collective:** [https://opencollective.com/vane-guard](https://opencollective.com/vane-guard)
+- **Email Contact:** harigov63@gmail.com
+
+---
+
 ## 📊 Budget Allocation (Monthly Breakdown)
 
 ### Distribution Formula
@@ -281,7 +301,9 @@ Education (10%):        $500   → Major conference attendance, workshops
 
 ## 🔗 Links & Resources
 
+- **GitHub Sponsors:** [https://github.com/sponsors/AnticipatedD](https://github.com/sponsors/AnticipatedD)
 - **Open Collective Profile**: https://opencollective.com/vane-guard
+- **ORCID Profile:** [https://orcid.org/0009-0004-4378-5298/](https://orcid.org/0009-0004-4378-5298/)
 - **Monthly Reports**: https://github.com/AnticipatedD/Vane-guard-sovereign-orchestrator/wiki/Sponsor-Reports
 - **Roadmap**: https://github.com/AnticipatedD/Vane-guard-sovereign-orchestrator/projects
 - **Community**: Discord/GitHub Discussions
@@ -302,5 +324,6 @@ Your sponsorship directly powers:
 
 ---
 
-*Last Updated: 2026-06-05*  
+*Last Updated: 2026-07-13*  
+*Principal Researcher: MD ABUL HOSSAIN | ORCID: 0009-0004-4378-5298*  
 *Next Report Due: [Monthly]*
