@@ -12,7 +12,7 @@ This document outlines exactly how every dollar from GitHub Sponsors and Open Co
 - **Title:** Founder & Chairman, Vane Enterprise LLC
 - **ORCID:** [0009-0004-4378-5298](https://orcid.org/0009-0004-4378-5298/)
 - **Research Focus:** Enterprise AI Safety, Hallucination Prevention, Zero-Trust RAG Pipeline Architecture
-- **Contact:** harigov63@gmail.com
+- **Contact:** harigov63@gmail.com or mdabulhossain1008@gmail.com
 
 ---
 
@@ -22,7 +22,7 @@ This document outlines exactly how every dollar from GitHub Sponsors and Open Co
 
 - **GitHub Sponsors:** [Sponsor MD ABUL HOSSAIN](https://github.com/sponsors/AnticipatedD)
 - **Open Collective:** [https://opencollective.com/vane-guard](https://opencollective.com/vane-guard)
-- **Email Contact:** harigov63@gmail.com
+- **Email Contact:** harigov63@gmail.com or mdabulhossain1008@gmail.com
 
 ---
 
@@ -307,7 +307,7 @@ Education (10%):        $500   → Major conference attendance, workshops
 - **Monthly Reports**: https://github.com/AnticipatedD/Vane-guard-sovereign-orchestrator/wiki/Sponsor-Reports
 - **Roadmap**: https://github.com/AnticipatedD/Vane-guard-sovereign-orchestrator/projects
 - **Community**: Discord/GitHub Discussions
-- **Contact**: harigov63@gmail.com
+- **Contact**: harigov63@gmail.com or mdabulhossain1008@gmail.com
 
 ---
 
