@@ -255,6 +255,23 @@ I'm always interested in discussing innovative solutions, exploring new technolo
 Secure your infrastructure using the official **Vane-Guard Sovereign Framework (v1.0)** blueprint. Protect your system root IDs, eliminate hallucinations, and access editable production diagrams instantly.
 👉 **[Get the Sovereign AI Security Framework Toolkit on Gumroad Now](https://dvane.gumroad.com/l/enterprise)**
 
+
+mdahossain/
+├── index.html                          [ENTERPRISE PORTFOLIO LANDING]
+├── extensions.html                     [M2M TOKEN ENGINE SHOWCASE]
+├── extensions-core/
+│   ├── m2m-oauth-isolation.html       [OAUTH2 SECURITY BLUEPRINT]
+│   └── voice-orchestrator.html        [REALTIME VOICE PIPELINE]
+├── privacy.html                        [DATA PRIVACY POLICY]
+├── security.html                       [SECURITY POLICY & DISCLOSURE]
+├── terms.html                          [TERMS OF SERVICE]
+├── netlify.toml                        [DEPLOYMENT CONFIG + SECURITY HEADERS]
+├── _redirects                          [HTTP REDIRECT RULES]
+├── robots.txt                          [SEO & BOT MANAGEMENT]
+├── .gitignore                          [REPOSITORY HYGIENE]
+├── package.json                        [BUILD SCRIPTS & DEPENDENCIES]
+└── README.md                           [DEPLOYMENT DOCUMENTATION]
+
 ---
 
 *Last Updated: 2026-05-28*
