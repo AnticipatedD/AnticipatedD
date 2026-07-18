@@ -3,9 +3,9 @@
 **Business | Offshore Architecture Engineer | Entrepreneur**
 
 ### 📚 Academic Citation & Verified DOI
-This framework is officially registered and archived with the European Union open-access infrastructure:
-👉 **Official DOI:** [10.5281/zenodo.21301987](https://doi.org)
-
+This framework is officially registered and archived with the European Union open-access infrastructure: 
+👉 **Official DOI:** 
+<img width="191" height="20" alt="17843549723983259952907924737355" src="https://github.com/user-attachments/assets/0fbb4c87-717d-414b-8576-e86a47a80798" />
 
 🔗 **Support My Work:** [💰 Become a Sponsor](https://github.com/sponsors/AnticipatedD) | [☕ Open Collective](https://opencollective.com/vane-guard)
 
