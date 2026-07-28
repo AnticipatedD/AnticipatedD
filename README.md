@@ -1,4 +1,4 @@
-# Hi there! 👋 I'm MD ABUL HOSSAIN (AnticipatedD)
+# Hello everyone, this is MD ABUL HOSSAIN (AnticipatedD)
 
 **Business | Offshore Architecture Engineer | Entrepreneur**
 
@@ -23,6 +23,12 @@ As the founder and leader of **Vane Enterprise LLC**, I drive innovation through
 
 ## 💼 Professional Background
 
+- **Masters in Marketing & Innovation**: From Anglia Ruskin University, Chelmsford, London. United Kingdom (🇬🇧)
+- **PgD in Business Management & Strategy**:
+From Association of Business Practitioners (ABP). London, United Kingdom (🇬🇧)
+- **Bachelor Of Business Administration (B.B.A)**:
+From University of Madras, Chennai. India (🇮🇳)
+- **Certified IMS Logical Relationships**: Dedicated and Partner Plus relationship building up with IMB Technical Talent
 - **Business Owner & Entrepreneur**: Founded and scaled Vane Enterprise LLC
 - **Offshore Architecture Engineer**: Designed complex systems for Amazon, Google, and enterprise clients
 - **Google Admin Console Expert**: Certified holder of Chrome Enterprise and Android Enterprise setup certifications
@@ -64,12 +70,14 @@ As the founder and leader of **Vane Enterprise LLC**, I drive innovation through
 
 A revolutionary framework designed to eliminate AI hallucinations and ensure reliable, sovereign AI operations. This framework has been published and is available on Gumroad for enterprise and development teams.
 
-- 📦 **Available on Gumroad**: [Stop AI Hallucinations Forever: The Vane-Guard Sovereign Framework](https://dvane.gumroad.com/l/Vane-Guard)
+- 📦 **Available on Gumroad**: AI Hallucinations cost businesses millions in inaccurate data, compliance liabilities, and broken user trust. Stop them permanently at the framework level. 👉 [Get the Stop AI Hallucinations Forever: The Vane-Guard Sovereign Framework (v1.0)](https://dvane.gumroad.com/l/Vane-Guard)
 - Protect your system root IDs, eliminate hallucinations, and access editable production diagrams instantly. 👉 [Get the Sovereign AI Security Framework Toolkit on Gumroad Now](https://dvane.gumroad.com/l/enterprise)
+- Vane-Guard Sovereign Framework (v1.0.0) - Commercial Licensing. 👉 [Get immediate commercial access to the Vane-Guard Sovereign Framework](https://dvane.gumroad.com/l/vane-core)
+  
 - 🎯 **Purpose**: Ensuring AI reliability and preventing hallucinations in production environments
 - 💼 **Use Case**: Enterprise AI deployments, critical systems, sovereign AI operations
 
-### 🔧 Vane-Guard-Sovereign-Orchestrator
+### 🔧Vane-Guard-Sovereign-Orchestrator
 **Complete End-to-End RAG Pipeline & GitHub App**
 
 An intelligent orchestration system with a complete RAG (Retrieval-Augmented Generation) pipeline deployed as a GitHub App, managing complex workflows and automating enterprise operations.
@@ -201,11 +209,13 @@ I'm always interested in discussing innovative solutions, exploring new technolo
 
 ### 📫 Contact & Social Links
 
-- **Email**: [harigov63@gmail.com](mailto:harigov63@gmail.com)
+- **Email**: [harigov63@gmail.com](mailto:harigov63@gmail.com) or [mdabulhossain1008@gmail.com](mailto:mdabulhossain1008@gmail.com)
+- **My-Expert-Portfolio**: [MD ABUL HOSSAIN](https://mdabul.netlify.app)
 - **Facebook**: [MD ABUL HOSSAIN](https://www.facebook.com/mdabulhossain1008)
 - **Instagram**: [MD ABUL HOSSAIN](https://www.instagram.com/mdabulhossain2026)
 - **Organization**: [Vane Enterprise LLC](https://vane-enterprise.github.io)
 - **Alternative GitHub**: [@myou260312-eng](https://github.com/myou260312-eng)
+- **Project**: [Vane-Guard Sovereign Framework](https://vane-guard-sovereign-framework.vercel.app)
 
 ---
 
@@ -274,4 +284,4 @@ mdahossain/
 
 ---
 
-*Last Updated: 2026-05-28*
+*Last Updated: 2026-07-28*
