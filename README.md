@@ -1,6 +1,6 @@
 # Hello everyone, this is MD ABUL HOSSAIN (AnticipatedD)
 
-**EU Funding & Tenders Expert | AlphaNova Global Rank #22  | Offshore Architecture Engineer | Business Entrepreneur**
+**Business Partner Plus with IBM | EU F&T Expert [EX2026D1473148] | AlphaNova Global Leaderboard Rank #22  | Web of  Science ResearcherID: QQZ-6739-2026 |Offshore Architecture Engineer | Business Entrepreneur**
 
 ### 📚 Academic Citation & Verified DOI
 This framework is officially registered and archived with the European Union open-access infrastructure: 
