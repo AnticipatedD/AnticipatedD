@@ -40,19 +40,19 @@ As the founder and leader of **Vane Enterprise LLC**, I drive innovation through
 
 ---
 
-## 💼 Professional Background
+## 💼 Educational & Professional Background
 
-- **Masters in Marketing & Innovation**: From Anglia Ruskin University, Chelmsford, London. United Kingdom (🇬🇧)
+- **Masters in Marketing & Innovation**: From Anglia Ruskin University, Chelmsford, London. United Kingdom (🇬🇧).
 - **PgD in Business Management & Strategy**:
-From Association of Business Practitioners (ABP). London, United Kingdom (🇬🇧)
+From Association of Business Practitioners (ABP). London, United Kingdom (🇬🇧).
 - **Bachelor Of Business Administration (B.B.A)**:
-From University of Madras, Chennai. India (🇮🇳)
-- **Certified IMS Logical Relationships**: Dedicated and Partner Plus relationship building up with IMB Technical Talent
-- **Business Owner & Entrepreneur**: Founded and scaled Vane Enterprise LLC
-- **Offshore Architecture Engineer**: Designed complex systems for Amazon, Google, and enterprise clients
-- **Google Admin Console Expert**: Certified holder of Chrome Enterprise and Android Enterprise setup certifications
-- **GitHub App Developer**: Creator of the "Vane-Guard-Sovereign-Orchestrator" deployed GitHub App
-- **AI Researcher & Developer**: Specializing in preventing AI hallucinations and creating sovereign AI solutions
+From University of Madras, Chennai. India (🇮🇳).
+- **Certified IMS Logical Relationships**: Dedicated and Partner Plus relationship building up with IMB Technical Talent.
+- **Business Owner & Entrepreneur**: Founded and scaled Vane Enterprise LLC.
+- **Offshore Architecture Engineer**: Designed complex systems for Amazon, Google, and enterprise clients.
+- **Google Admin Console Expert**: Certified holder of Chrome Enterprise and Android Enterprise setup certifications.
+- **GitHub App Developer**: Creator of the "Vane-Guard-Sovereign-Orchestrator" deployed GitHub App.
+- **AI Researcher & Developer**: Specializing in preventing AI hallucinations and creating sovereign AI solutions.
 
 ---
 
