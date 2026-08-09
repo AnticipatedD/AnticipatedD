@@ -1,6 +1,6 @@
 # Hello everyone, this is MD ABUL HOSSAIN (AnticipatedD)
 
-**Business Partner Plus with IBM | EU F&T Expert [EX2026D1473148] | AlphaNova Global Leaderboard Rank #22  | Web of  Science ResearcherID: QQZ-6739-2026 |Offshore Architecture Engineer | Business Entrepreneur**
+**SVP & Head of Strategic Partnerships at TARU Global Access | IBM Business Partner Plus | EU F&T Expert EX2026D1473148 | AlphaNova Tech Global Leaderboard Rank #28 Individual Rank 57/873 | Web of Science ResearcherID: QQZ-6739-2026 | ORCiD: 0009-0004-4378-5298**
 
 ### 📚 Academic Citation & Verified DOI
 This framework is officially registered and archived with the European Union open-access infrastructure: 
@@ -24,15 +24,15 @@ Creator of the **Vane-Guard Sovereign Framework**, a diagnostic protocol that an
 **Key Projects & Contributions**: 
 
 **Vane-Guard Sovereign Framework (v1.0): [Zenodo Record 21301987](https://doi.org/10.5281/zenodo.21301987)**
-》Designed an enterprise-grade diagnostic protocol to prevent AI hallucinations by enforcing strict logic gates and sovereign data boundaries. 
+- Designed an enterprise-grade diagnostic protocol to prevent AI hallucinations by enforcing strict logic gates and sovereign data boundaries. 
 
 **Vane-Guard Intelligence Platform: 
 [Zenodo Record 21342530](https://doi.org/10.5281/zenodo.21342530)**
-》Architected a secure intelligence platform compliant with EU data sovereignty standards, integrating "Human-in-the-Loop" validation for high-risk automated decision-making. 
+- Architected a secure intelligence platform compliant with EU data sovereignty standards, integrating "Human-in-the-Loop" validation for high-risk automated decision-making. 
 
 **Sovereign RAG Diagnostic Release:
 [Zenodo Record 21303273](https://doi.org/10.5281/zenodo.21303273)**
-》Developed the "Initial Diagnostic Release" for Retrieval-Augmented Generation (RAG) systems, establishing a benchmark for verifying source attribution in generative AI outputs.
+- Developed the "Initial Diagnostic Release" for Retrieval-Augmented Generation (RAG) systems, establishing a benchmark for verifying source attribution in generative AI outputs.
 
 I'm an experienced offshore architecture engineer and business entrepreneur focused on building enterprise-grade solutions for Fortune 500 companies including **Amazon** and **Google**. My expertise spans designing scalable systems, implementing AI-driven frameworks, and architecting robust cloud infrastructures.
 
