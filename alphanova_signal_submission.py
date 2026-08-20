@@ -1,11 +1,23 @@
+# /// script
+# dependencies = [
+#   "numpy>=1.19.0",
+#   "pandas>=1.2.0",
+#   "scipy>=1.6.0",
+#   "scikit-learn>=0.24.0",
+#   "xgboost>=1.5.0",
+#   "lightgbm>=3.3.0",
+#   "pyarrow>=6.0.0",
+# ]
+# /// 
+
 """
 AlphaNova Biweekly Competition — Season 1, Cycle 1
 Production-Ready Trading Signal Submission
-
+def __init__(self):
 SUBMISSION TYPE: Cross-Sectional Momentum + Regime-Aware Feature Interactions
 TARGET: Sharpe > 0.15, IC > 0.02, City Novelty > 60°
 CONSTRAINTS: 4min train, 60s predict, 8GB memory, 5bp transaction cost per rebalance
-
+def __init__(self):
 Architecture:
 1. Adaptive feature engineering (nonlinearities, cross-sectional structure)
 2. Regime detection (dispersion-aware positioning)
@@ -83,23 +95,23 @@ class MyPredictor(Predictor):
         self.train_sharpe = None
         self.validation_sharpe = None
     
-    # ==================== TRAINING PIPELINE ====================
-    
+   # ============== TRAINING PIPELINE =============
     def train(self, features, target):
         """
         4-minute CPU-efficient training pipeline.
-        
+        def _validate_input(self, features, target):
         Args:
             features: pd.DataFrame, shape (T, J*6) or MultiIndex, 6 features × 20 assets
             target:   pd.Series, shape (T,), forward-looking z-scored target
+            def _validate_input(self, features, target):
         """
         try:
             # Step 0: Parse & validate input
-            self._validate_input(features, target)
+            def _validate_input(self, features, target):
             
             # Step 1: Extract asset-level structure
             X_raw, y_raw = self._extract_tensors(features, target)
-            
+            def _validate_input(self, features, target):
             # Step 2: Feature engineering (cross-sectional interactions)
             X_engineered = self._engineer_features(X_raw)
             
@@ -130,7 +142,6 @@ class MyPredictor(Predictor):
         
         if np.isnan(target).any():
             raise ValueError("target contains NaN values")
-    
     def _extract_tensors(self, features, target):
         """
         Convert MultiIndex or flat DataFrame to (T, J, 6) tensors.
@@ -302,14 +313,14 @@ class MyPredictor(Predictor):
             self.train_ic = np.mean(ic_list) if ic_list else 0.0
             
         except Exception as e:
-            self.train_ic = 0.0
+            self.train_ic = 0.0 
+
+# ============== PREDICTION PIPELINE ==============
     
-    # ==================== PREDICTION PIPELINE ====================
-    
-    def predict(self, features):
+    def predict(self, features): 
         """
         Generate cross-sectionally de-meaned trading signal.
-        
+        def _apply_turnover_control(self, signal_raw):
         Args:
             features: pd.DataFrame or np.ndarray, same format as training
         
@@ -391,7 +402,7 @@ class MyPredictor(Predictor):
         return signal_smooth
 
 
-# ==================== VALIDATION HARNESS ====================
+# ============== VALIDATION HARNESS ==============
 
 def validate_submission(features, target, returns=None):
     """
@@ -428,23 +439,26 @@ def validate_submission(features, target, returns=None):
         residual_mean = np.abs(signal.mean(axis=1)).max()
         print(f"Max cross-sectional mean: {residual_mean:.2e}")
         if residual_mean > 1e-6:
-            print("⚠ WARNING: Signal not properly de-meaned")
+            print("⚠️ WARNING: Signal not properly de-meaned")
         else:
             print("✓ De-meaning verified")
-        
+        def validate_submission(features, target, returns=None):
+            
         # Check for NaN/inf
         print("\n[4/5] Checking numerical integrity...")
         nan_count = np.isnan(signal).sum()
         inf_count = np.isinf(signal).sum()
         print(f"NaN count: {nan_count}, Inf count: {inf_count}")
         if nan_count > 0 or inf_count > 0:
-            print("⚠ WARNING: Numerical issues detected")
+            print("⚠️ WARNING: Numerical issues detected")
         else:
             print("✓ Numerically sound")
-        
+        def validate_submission(features, target, returns=None):
+            
         # Estimate Sharpe (if returns provided)
         if returns is not None:
             print("\n[5/5] Estimating Sharpe ratio...")
+            def validate_submission(features, target, returns=None):
             returns_arr = np.array(returns).flatten()
             
             # Portfolio return: <P(t-1), X(t)> - 5bp turnover
@@ -463,11 +477,11 @@ def validate_submission(features, target, returns=None):
         print("="*70 + "\n")
         
         return predictor, signal
-        
+     
     except Exception as e:
         print(f"\n✗ VALIDATION FAILED: {str(e)}")
-        raise
-
-
+        raise      
+ def validate_submission(features, target, returns=None):
+     
 if __name__ == "__main__":
     print(__doc__)
