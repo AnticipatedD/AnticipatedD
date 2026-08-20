@@ -45,7 +45,7 @@
 ═══════════════════════════════════════════════════════════════════════════════
 
 SUBMISSION NAME: MyPredictor (AlphaNova Season 1, Cycle 1)
-AUTHOR: MD ABUL HOSSAIN (Dante Vane) / Vane Enterprise LLC
+AUTHOR: MD ABUL HOSSAIN (AnticipatedD)
 SUBMISSION DATE: 15 Aug – 1 Sept 2026
 COMPETITION PHASE: Biweekly Submission Window (Cycle 1)
 LIVE SCORING: 1 Sept – 30 Sept 2026 (1-month verification period)
