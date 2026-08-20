@@ -26,19 +26,19 @@ Key Design Principles:
 5. No look-ahead bias, no per-ticker patterns, fully cross-sectional
 
 Expected Performance:
-- Sharpe: 0.15–0.25 (baseline ~0.0 on this hard target)
-- IC: 0.008–0.015 (realistic given anonymized features)
-- City Novelty: >60° (first submission, high uniqueness)
-- Turnover: Smoothed (EMA α=0.15) to minimize transaction costs
+- Sharpe: 0.15 - 0.25 (baseline ~0.0 on this hard target)
+- IC: 0.008 - 0.015 (realistic given anonymized features)
+- City Novelty: >60 (first submission, high uniqueness)
+- Turnover: Smoothed (EMA alpha = 0.15) to minimize transaction costs
 
 Submission Checklist:
-✓ Inherits from Predictor class
-✓ train(features, target) implemented (<4min)
-✓ predict(features) returns de-meaned signal (<60s)
-✓ All logic inside class (no global state)
-✓ Handles missing data, extreme values, edge cases
-✓ Numerical safeguards (NaN/Inf guards, residual checks)
-✓ No data leakage, no future lookback
+- Inherits from Predictor class
+- train(features, target) implemented (<4min)
+- predict(features) returns de-meaned signal (<60s)
+- All logic inside class (no global state)
+- Handles missing data, extreme values, edge cases
+- Numerical safeguards (NaN/Inf guards, residual checks)
+- No data leakage, no future lookback
 """
 
 import numpy as np
@@ -73,6 +73,7 @@ class MyPredictor(Predictor):
     
     def __init__(self):
         """Initialize predictor state."""
+        super().__init__()
         self.is_trained = False
         self.n_assets = None
         self.n_features = None
@@ -104,7 +105,7 @@ class MyPredictor(Predictor):
         Args:
             features: pd.DataFrame
                 Shape (T, J*6) or MultiIndex with (feature, ticker) columns
-                Contains 6 anonymized features × 20 assets
+                Contains 6 anonymized features x 20 assets
                 
             target: pd.Series
                 Shape (T,), forward-looking z-scored target (clipped ±5)
@@ -147,7 +148,7 @@ class MyPredictor(Predictor):
             raise ValueError(f"Length mismatch: features={len(features)}, target={len(target)}")
         
         if len(features) < 50:
-            raise ValueError(f"Insufficient data: {len(features)} samples (need ≥50)")
+            raise ValueError(f"Insufficient data: {len(features)} samples (need >= 50)")
         
         if np.isnan(target).any():
             raise ValueError("target contains NaN values")
@@ -188,7 +189,7 @@ class MyPredictor(Predictor):
         Nonlinear feature engineering to capture cross-sectional structure.
         
         Rationale: Competition explicitly states "simple transformations carry
-        little edge" — this is the core of our alpha generation.
+        little edge" - this is the core of our alpha generation.
         
         Input:  X_raw (T, J, 6)
         Output: X_eng (T, J * n_engineered_features)
@@ -274,7 +275,7 @@ class MyPredictor(Predictor):
         
         self.coefficients = ridge.coef_
         self.intercept = ridge.intercept_
-    
+
     # ==================== PREDICTION PIPELINE ====================
     
     def predict(self, features):
@@ -286,7 +287,7 @@ class MyPredictor(Predictor):
         
         Returns:
             signal: np.ndarray, shape (T, J), cross-sectionally de-meaned
-                    ∑_j signal[t, j] ≈ 0 for every timestamp t
+                    sum_j signal[t, j] approx 0 for every timestamp t
         
         Constraints:
             - Must complete within 60 seconds
@@ -346,8 +347,8 @@ class MyPredictor(Predictor):
         Exponential smoothing to reduce portfolio turnover.
         
         Impact: Reduces ~6% volatility drag from hourly rebalancing
-        Formula: P_smooth(t) = α * P(t) + (1-α) * P_smooth(t-1)
-        where α = 0.15 → ~6.7 period EMA
+        Formula: P_smooth(t) = alpha * P(t) + (1 - alpha) * P_smooth(t-1)
+        where alpha = 0.15 -> ~6.7 period EMA
         """
         T, J = signal_raw.shape
         signal_smooth = np.zeros_like(signal_raw)
