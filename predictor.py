@@ -1,3 +1,26 @@
+# /// script
+# dependencies = [
+#     "numpy",
+#     "pandas",
+#     "scikit-learn",
+#     "scipy"
+# ]
+# ///
+
+import os
+import warnings
+import numpy as np
+import pandas as pd
+from scipy import stats
+from sklearn.preprocessing import RobustScaler
+from sklearn.linear_model import Ridge
+
+warnings.filterwarnings("ignore", category=FutureWarning)
+warnings.filterwarnings("ignore", category=DeprecationWarning)
+
+from predictor import Predictor
+
+class MyPredictor(Predictor):
 """
 AlphaNova Predictor Base Class
 ==============================
