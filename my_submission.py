@@ -1,22 +1,35 @@
 # /// script
 # dependencies = [
-#   "numpy>=1.19.0",
-#   "pandas>=1.2.0",
-#   "scipy>=1.6.0",
-#   "scikit-learn>=0.24.0",
-#   "xgboost>=1.5.0",
-#   "lightgbm>=3.3.0",
-#   "pyarrow>=6.0.0",
+#     "numpy",
+#     "pandas",
+#     "scikit-learn",
+#     "scipy"
 # ]
 # ///
 
+import numpy as np
+import pandas as pd
+from sklearn.preprocessing import RobustScaler
+from sklearn.linear_model import Ridge
+from scipy import stats
+import warnings
+
+warnings.filterwarnings("ignore", category=FutureWarning)
+warnings.filterwarnings("ignore", category=DeprecationWarning)
+
+from predictor import Predictor
+
+class MyPredictor(Predictor):
 """
+Model Name: Anticipated_eps_submission.py 
+Elite AlphaNova Cross-Sectional Trading Signal
 AlphaNova Season 1, Cycle 1 — Elite Production Signal Submission
 ================================================================
 
 Strategy: Cross-Sectional Momentum + Feature Interactions + Turnover Optimization
 Inheritance: Inherits from predictor.py (client-required interface)
 Architecture: Ridge regression with EMA smoothing for Sharpe maximization
+"""
 
 Key Design Principles:
 1. Cross-sectional de-meaning enforced at every step (mandatory for acceptance)
@@ -40,24 +53,6 @@ Submission Checklist:
 - Numerical safeguards (NaN/Inf guards, residual checks)
 - No data leakage, no future lookback
 """
-
-import numpy as np
-import pandas as pd
-from sklearn.preprocessing import RobustScaler
-from sklearn.linear_model import Ridge
-from scipy import stats
-import warnings
-
-warnings.filterwarnings("ignore", category=FutureWarning)
-warnings.filterwarnings("ignore", category=DeprecationWarning)
-
-from predictor import Predictor
-
-
-class MyPredictor(Predictor):
-    """
-    Elite AlphaNova Cross-Sectional Trading Signal
-    
     Core Strategy:
     - Ridge regression on engineered cross-sectional features
     - Exponential smoothing to control turnover (6% Sharpe improvement)
