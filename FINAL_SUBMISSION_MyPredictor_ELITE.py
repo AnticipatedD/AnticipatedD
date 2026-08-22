@@ -1,12 +1,9 @@
 # /// script
 # dependencies = [
-#   "numpy>=1.19.0",
-#   "pandas>=1.2.0",
-#   "scipy>=1.6.0",
-#   "scikit-learn>=0.24.0",
-#   "xgboost>=1.5.0",
-#   "lightgbm>=3.3.0",
-#   "pyarrow>=6.0.0",
+#     "numpy",
+#     "pandas",
+#     "scikit-learn",
+#     "scipy"
 # ]
 # ///
 
