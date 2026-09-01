@@ -613,7 +613,7 @@ class MyPredictor(Predictor):
         self.n_features = None
         
         # Feature scaling (IQR-based, robust to outliers)
-        self.feature_scaler = RobustScaler(quantile_range=(5.0, 95.0))
+        self.feature_scaler = RobustScaler(quantile_range=(5.0, 85.0))
         
         # Ridge regression state
         self.coefficients = None
@@ -622,7 +622,7 @@ class MyPredictor(Predictor):
         self.target_std = None
         
         # Turnover control (EMA parameter)
-        self.alpha_smooth = 0.15  # ~6.7-period exponential moving average
+        self.alpha_smooth = 0.28  # ~6.7-period exponential moving average
     
     def train(self, features, target):
         """
@@ -646,7 +646,7 @@ class MyPredictor(Predictor):
             
             # [4] Normalize
             X_normalized = self.feature_scaler.fit_transform(X_engineered)
-            X_normalized = np.clip(X_normalized, -10, 10)
+            X_normalized = np.clip(X_normalized, -1, 1)
             
             # [5] Fit ridge regression
             self._fit_ridge_regression(X_normalized, y_raw)
@@ -664,8 +664,8 @@ class MyPredictor(Predictor):
         if len(features) != len(target):
             raise ValueError(f"Shape mismatch: len(features)={len(features)} vs len(target)={len(target)}")
         
-        if len(features) < 50:
-            raise ValueError(f"Insufficient data: {len(features)} samples (minimum 50)")
+        if len(features) < 65:
+            raise ValueError(f"Insufficient data: {len(features)} samples (minimum 65)")
         
         if np.isnan(target).any():
             raise ValueError("target contains NaN")
@@ -720,7 +720,7 @@ class MyPredictor(Predictor):
                 feat1, feat2 = X_raw[:, :, f1], X_raw[:, :, f2]
                 engineered.append(feat1 * feat2)
                 with np.errstate(divide='ignore', invalid='ignore'):
-                    engineered.append(np.where(np.abs(feat2) > 1e-8, feat1 / (np.abs(feat2) + 1e-8), feat1))
+                    engineered.append(np.where(np.abs(feat2) > 1e-9, feat1 / (np.abs(feat2) + 1e-9), feat1))
         
         # (3) Temporal: volatility + momentum
         for f in range(F):
@@ -740,10 +740,10 @@ class MyPredictor(Predictor):
         T, D = X_norm.shape
         
         self.target_mean = np.mean(y_raw)
-        self.target_std = np.std(y_raw) + 1e-8
+        self.target_std = np.std(y_raw) + 1e-9
         y_std = (y_raw - self.target_mean) / self.target_std
         
-        lambda_ridge = 10.0 / np.sqrt(D)
+        lambda_ridge = 35.0 / np.sqrt(D)
         ridge = Ridge(alpha=lambda_ridge, fit_intercept=True, max_iter=10000)
         ridge.fit(X_norm, y_std)
         
@@ -775,7 +775,7 @@ class MyPredictor(Predictor):
             # [CRITICAL] Cross-sectional de-meaning (FIRST PASS)
             signal_demeaned = signal_raw - signal_raw.mean(axis=1, keepdims=True)
             residual_mean = np.abs(signal_demeaned.mean(axis=1)).max()
-            if residual_mean > 1e-6:
+            if residual_mean > 1e-9:
                 signal_demeaned -= signal_demeaned.mean(axis=1, keepdims=True)
             
             # Turnover control: EMA smoothing
@@ -804,7 +804,7 @@ class MyPredictor(Predictor):
         # Re-normalize to preserve signal magnitude
         for t in range(T):
             std_t = np.std(signal_smooth[t])
-            if std_t > 1e-8:
+            if std_t > 1e-9:
                 signal_smooth[t] *= np.std(signal_raw[t]) / std_t
         
         return signal_smooth
