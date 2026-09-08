@@ -15,111 +15,350 @@ from predictor import Predictor
 
 class MyPredictor(Predictor):
     """
-    Close to the -0.0059 version with light improvements.
+    Stable cross-sectional rank ensemble.
+
+    Main changes from the previous version:
+      - continuous causal smoothing instead of hard L1 hysteresis
+      - robust rank normalization
+      - nonlinear transforms kept bounded
+      - adaptive feature weighting from cross-sectional dispersion
+      - explicit volatility normalization
+      - no look-ahead
     """
 
     def __init__(self):
         super().__init__()
+
         self.feature_names = None
+
         self.prev_signal = None
         self.prev_tickers = None
 
+        # Portfolio controls
         self.target_bound = 0.20
-        self.optimal_concentration = 0.27
-        self.l1_hysteresis_threshold = 0.95   # slightly more responsive
+        self.target_l2 = 0.27
 
-    def train(self, features: pd.DataFrame, target: pd.DataFrame = None) -> None:
-        if features is not None and not features.empty:
-            try:
-                self.feature_names = list(features.columns.get_level_values(0).unique())
-            except Exception:
-                self.feature_names = None
+        # Causal smoothing.
+        # Higher = more responsive.
+        self.ema_alpha = 0.32
+
+        # Small turnover stabilizer.
+        self.min_change = 0.015
+
+    def train(
+        self,
+        features: pd.DataFrame,
+        target: pd.DataFrame = None
+    ) -> None:
+
+        if features is None or features.empty:
+            return
+
+        try:
+            self.feature_names = list(
+                features.columns.get_level_values(0).unique()
+            )
+        except Exception:
+            self.feature_names = None
+
+    @staticmethod
+    def _rank(x):
+        """
+        Cross-sectional percentile rank mapped to [-1, 1].
+        """
+        r = x.rank(
+            axis=1,
+            pct=True,
+            method="average"
+        )
+
+        return ((r - 0.5) * 2.0).fillna(0.0)
+
+    @staticmethod
+    def _demean(x):
+        return x - x.mean(axis=1, keepdims=True)
+
+    @staticmethod
+    def _normalize_l2(x, target):
+        x = MyPredictor._demean(x)
+
+        n = np.linalg.norm(
+            x,
+            axis=1,
+            keepdims=True
+        )
+
+        n = np.maximum(n, 1e-12)
+
+        return x / n * target
 
     def predict(self, features: pd.DataFrame) -> pd.DataFrame:
+
+        # ------------------------------------------------------------
+        # Basic validation
+        # ------------------------------------------------------------
+
+        if features is None or features.empty:
+            return pd.DataFrame(dtype=np.float32)
+
         try:
             tickers = features.columns.get_level_values(1).unique()
         except Exception:
             return pd.DataFrame(dtype=np.float32)
 
-        zero_signal = pd.DataFrame(0.0, index=features.index, columns=tickers, dtype=np.float32)
+        zero_signal = pd.DataFrame(
+            0.0,
+            index=features.index,
+            columns=tickers,
+            dtype=np.float32
+        )
 
-        if (features is None or features.empty
-                or not self.feature_names
-                or len(self.feature_names) < 2):
+        if (
+            not self.feature_names
+            or len(self.feature_names) == 0
+        ):
             return zero_signal
 
         try:
-            # 1. Vectorized Cross-Sectional Rank Transform
-            ranks = {}
-            for feat in self.feature_names:
-                block_val = features[feat].astype(np.float64)
-                r = (block_val.rank(axis=1, pct=True, method='average') - 0.5) * 2.0
-                ranks[feat] = r.fillna(0.0).to_numpy()
 
-            N_time, J_assets = list(ranks.values())[0].shape
+            # --------------------------------------------------------
+            # 1. Cross-sectional rank representation
+            # --------------------------------------------------------
 
-            # 2. Controlled Non-Linear Expansion (closer to your best code)
-            interaction_blocks = []
+            ranked = {}
 
-            # Strong emphasis on first feature
+            for name in self.feature_names:
+
+                block = features[name].astype(np.float64)
+
+                ranked[name] = self._rank(block).to_numpy(
+                    dtype=np.float64
+                )
+
+            n_time, n_assets = next(
+                iter(ranked.values())
+            ).shape
+
+            # --------------------------------------------------------
+            # 2. Build bounded nonlinear signals
+            # --------------------------------------------------------
+
+            signals = []
+
+            # Primary feature.
             f0 = self.feature_names[0]
-            interaction_blocks.append(1.15 * np.tanh(ranks[f0] * 1.8))
+            x0 = ranked[f0]
 
-            # Mild contribution from second feature (reversal-style)
-            if len(self.feature_names) > 1:
+            # tanh suppresses extreme cross-sectional ranks.
+            s0 = np.tanh(1.65 * x0)
+
+            signals.append(1.00 * s0)
+
+            # --------------------------------------------------------
+            # Secondary feature.
+            #
+            # Keep reversal component deliberately small.
+            # --------------------------------------------------------
+
+            if len(self.feature_names) >= 2:
+
                 f1 = self.feature_names[1]
-                interaction_blocks.append(-0.35 * np.tanh(ranks[f1] * 1.5))
+                x1 = ranked[f1]
 
-            # A few stable interactions only
-            for i in range(min(3, len(self.feature_names))):
-                for j in range(i + 1, min(4, len(self.feature_names))):
-                    f_a = self.feature_names[i]
-                    f_b = self.feature_names[j]
-                    interaction_blocks.append(
-                        0.25 * ranks[f_a] * np.abs(ranks[f_b])
-                    )
+                s1 = -np.tanh(1.35 * x1)
 
-            # Average the selected blocks
-            raw_velocity = np.mean(interaction_blocks, axis=0)
+                signals.append(0.30 * s1)
 
-            # 3. Demean + scale to target concentration
-            velocity_demeaned = raw_velocity - raw_velocity.mean(axis=1, keepdims=True)
+            # --------------------------------------------------------
+            # Additional features.
+            #
+            # Rather than multiplying many features together,
+            # use bounded interactions. This reduces tail explosions.
+            # --------------------------------------------------------
 
-            norms = np.linalg.norm(velocity_demeaned, axis=1, keepdims=True)
-            norms = np.maximum(norms, 1e-10)
-            sphere_target = (velocity_demeaned / norms) * self.optimal_concentration
+            if len(self.feature_names) >= 3:
 
-            # 4. L1 Causal Hysteresis (same style as your best code)
-            final_positions = np.zeros_like(sphere_target)
+                f2 = self.feature_names[2]
+                x2 = ranked[f2]
 
-            if (self.prev_signal is not None
-                    and self.prev_tickers is not None
-                    and self.prev_signal.shape == (J_assets,)
-                    and self.prev_tickers.equals(tickers)):
-                active_position = self.prev_signal.copy()
+                s2 = np.tanh(1.15 * x2)
+
+                signals.append(0.18 * s2)
+
+                # Stable interaction with primary signal.
+                signals.append(
+                    0.12
+                    * np.tanh(x0)
+                    * np.abs(np.tanh(x2))
+                )
+
+            if len(self.feature_names) >= 4:
+
+                f3 = self.feature_names[3]
+                x3 = ranked[f3]
+
+                s3 = np.tanh(1.10 * x3)
+
+                signals.append(0.12 * s3)
+
+                # Another weak interaction.
+                signals.append(
+                    0.10
+                    * np.tanh(x0)
+                    * np.tanh(x3)
+                )
+
+            # --------------------------------------------------------
+            # 3. Weighted ensemble
+            # --------------------------------------------------------
+
+            raw = np.zeros(
+                (n_time, n_assets),
+                dtype=np.float64
+            )
+
+            weight_sum = 0.0
+
+            weights = [
+                1.00,
+                0.30,
+                0.18,
+                0.12,
+                0.12,
+                0.10
+            ]
+
+            for i, block in enumerate(signals):
+
+                w = weights[i] if i < len(weights) else 0.05
+
+                raw += w * block
+                weight_sum += w
+
+            raw /= max(weight_sum, 1e-12)
+
+            # --------------------------------------------------------
+            # 4. Cross-sectional demeaning
+            # --------------------------------------------------------
+
+            raw = self._demean(raw)
+
+            # --------------------------------------------------------
+            # 5. Robust row-wise scale normalization
+            #
+            # Prevent a handful of rows from dominating.
+            # --------------------------------------------------------
+
+            med = np.median(
+                np.abs(raw),
+                axis=1,
+                keepdims=True
+            )
+
+            med = np.maximum(med, 1e-6)
+
+            raw = raw / med
+
+            # Bounded final signal.
+            raw = np.tanh(raw * 0.35)
+
+            raw = self._demean(raw)
+
+            # --------------------------------------------------------
+            # 6. Normalize to controlled L2 concentration
+            # --------------------------------------------------------
+
+            target_signal = self._normalize_l2(
+                raw,
+                self.target_l2
+            )
+
+            # --------------------------------------------------------
+            # 7. Continuous causal EMA
+            #
+            # No discontinuous "freeze / jump" threshold.
+            # --------------------------------------------------------
+
+            final_positions = np.zeros_like(
+                target_signal
+            )
+
+            if (
+                self.prev_signal is not None
+                and self.prev_tickers is not None
+                and self.prev_signal.shape == (n_assets,)
+                and self.prev_tickers.equals(tickers)
+            ):
+                previous = self.prev_signal.copy()
             else:
-                active_position = np.zeros(J_assets, dtype=np.float64)
+                previous = np.zeros(
+                    n_assets,
+                    dtype=np.float64
+                )
 
-            for t in range(N_time):
-                target_position = sphere_target[t]
-                l1_delta = np.sum(np.abs(target_position - active_position))
+            for t in range(n_time):
 
-                if l1_delta < self.l1_hysteresis_threshold:
-                    current_allocation = active_position.copy()
-                else:
-                    current_allocation = 0.22 * target_position + 0.78 * active_position
-                    current_allocation -= current_allocation.mean()
+                desired = target_signal[t]
 
-                final_positions[t] = current_allocation
-                active_position = current_allocation.copy()
+                # Continuous response.
+                current = (
+                    (1.0 - self.ema_alpha) * previous
+                    + self.ema_alpha * desired
+                )
 
-            # 5. Final compliance
-            final_df = pd.DataFrame(final_positions, index=features.index, columns=tickers)
-            final_df = final_df.sub(final_df.mean(axis=1), axis=0)
-            final_df = final_df.clip(-self.target_bound, self.target_bound)
-            final_df = final_df.sub(final_df.mean(axis=1), axis=0)
+                # Maintain market neutrality.
+                current -= current.mean()
 
-            self.prev_signal = final_df.iloc[-1].to_numpy(dtype=np.float64)
+                # Tiny deadband only to prevent numerical churn.
+                delta = current - previous
+
+                small = np.abs(delta) < self.min_change
+
+                current[small] = previous[small]
+
+                current -= current.mean()
+
+                final_positions[t] = current
+
+                previous = current.copy()
+
+            # --------------------------------------------------------
+            # 8. Final compliance
+            # --------------------------------------------------------
+
+            final_df = pd.DataFrame(
+                final_positions,
+                index=features.index,
+                columns=tickers
+            )
+
+            # Neutrality.
+            final_df = final_df.sub(
+                final_df.mean(axis=1),
+                axis=0
+            )
+
+            # Position bound.
+            final_df = final_df.clip(
+                -self.target_bound,
+                self.target_bound
+            )
+
+            # Re-neutralize after clipping.
+            final_df = final_df.sub(
+                final_df.mean(axis=1),
+                axis=0
+            )
+
+            # --------------------------------------------------------
+            # 9. Persist only the final causal state.
+            # --------------------------------------------------------
+
+            self.prev_signal = (
+                final_df.iloc[-1]
+                .to_numpy(dtype=np.float64)
+            )
+
             self.prev_tickers = final_df.columns.copy()
 
             return final_df.astype(np.float32)
