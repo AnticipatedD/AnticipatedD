@@ -16,8 +16,10 @@ from predictor import Predictor
 
 class MyPredictor(Predictor):
     """
-    Clean Cross-Sectional Rank Momentum + Light Regularized Interactions.
-    Designed to clear AlphaNova overfitting gate and produce positive Sharpe.
+    AlphaNova multi-component cross-sectional signal.
+    Momentum (Feature.1) + Reversal + Value/Quality blend.
+    Strong Ridge + EMA smoothing + double demean.
+    Designed to clear overfitting gate and deliver positive Sharpe.
     """
 
     def __init__(self):
@@ -27,71 +29,66 @@ class MyPredictor(Predictor):
         self.prev_signal = None
         self.prev_tickers = None
 
-        # Hard constraints (match platform)
         self.target_bound = 0.20
-        self.gross_target = 0.30          # modest concentration
-        self.ema_alpha = 0.18             # light smoothing → lower turnover
-        self.ridge_lambda_base = 12.0     # strong L2 (prevents noise memorization)
+        self.gross_target = 0.28
+        self.ema_alpha = 0.20          # turnover control
+        self.ridge_alpha = 25.0        # strong L2 → passes shuffle test
+
+    def _cs_rank(self, x: np.ndarray) -> np.ndarray:
+        """Percentile rank → [-1, +1], robust to outliers."""
+        s = pd.Series(x)
+        r = (s.rank(pct=True, method="average") - 0.5) * 2.0
+        return r.fillna(0.0).values
 
     def train(self, features: pd.DataFrame, target: pd.DataFrame = None) -> None:
         if features is None or features.empty:
             return
 
         self.feature_names = list(features.columns.get_level_values(0).unique())
-        n_features = len(self.feature_names)
-
-        # Build simple, generalizable engineered matrix (ranks only + a few products)
-        X_list = []
-        y_list = []
-
-        # We process in time order (walk-forward safe)
         tickers = features.columns.get_level_values(1).unique()
         n_assets = len(tickers)
 
+        X_rows = []
+        y_rows = []
+
         for t in range(len(features)):
-            row_feats = []
+            # Extract the 6 feature vectors for this timestamp
+            fvals = []
             for feat in self.feature_names:
-                vals = features[feat].iloc[t].astype(np.float64).fillna(0.0).values
-                # Cross-sectional percentile rank → [-1, 1]
-                ranks = (pd.Series(vals).rank(pct=True).values - 0.5) * 2.0
-                row_feats.append(ranks)
+                vals = features[feat].iloc[t].reindex(tickers).astype(np.float64).fillna(0.0).values
+                fvals.append(vals)
+            fmat = np.column_stack(fvals)          # (J, 6)
 
-            # Stack ranks (shape: n_assets x n_features)
-            ranks_mat = np.column_stack(row_feats)          # (J, F)
+            # Engineered features (exactly the style that works)
+            ranks = np.column_stack([self._cs_rank(fmat[:, i]) for i in range(fmat.shape[1])])
 
-            # Light, stable interactions (only pairwise products of ranks)
+            # Simple stable interactions
             inter = []
-            for i in range(n_features):
-                for j in range(i + 1, n_features):
-                    inter.append(ranks_mat[:, i] * ranks_mat[:, j])
-
+            for i in range(ranks.shape[1]):
+                for j in range(i+1, ranks.shape[1]):
+                    inter.append(ranks[:, i] * ranks[:, j])
             if inter:
-                inter_mat = np.column_stack(inter)
-                X_t = np.hstack([ranks_mat, inter_mat])    # (J, F + C(F,2))
+                inter = np.column_stack(inter)
+                X_t = np.hstack([ranks, inter])
             else:
-                X_t = ranks_mat
+                X_t = ranks
 
-            X_list.append(X_t)
+            X_rows.append(X_t)
 
             if target is not None and not target.empty:
-                # Target is already de-meaned forward returns
                 y_t = target.iloc[t].reindex(tickers).fillna(0.0).values
-                y_list.append(y_t)
+                y_rows.append(y_t)
 
-        if not X_list:
+        if not X_rows:
             return
 
-        X = np.vstack(X_list)          # (T*J, D)
-        D = X.shape[1]
-
-        if y_list:
-            y = np.concatenate(y_list)
-            # Adaptive strong Ridge – key to passing the shuffle test
-            lam = self.ridge_lambda_base / np.sqrt(max(D, 1))
-            self.model = Ridge(alpha=lam, fit_intercept=False)
+        X = np.vstack(X_rows)
+        if y_rows:
+            y = np.concatenate(y_rows)
+            # Strong Ridge – critical for the overfitting gate
+            self.model = Ridge(alpha=self.ridge_alpha, fit_intercept=False)
             self.model.fit(X, y)
         else:
-            # Pure unsupervised fallback (equal-weight ranks)
             self.model = None
 
     def predict(self, features: pd.DataFrame) -> pd.DataFrame:
@@ -102,70 +99,70 @@ class MyPredictor(Predictor):
             return zero
 
         try:
-            n_features = len(self.feature_names)
             signals = []
 
             for t in range(len(features)):
-                row_feats = []
+                fvals = []
                 for feat in self.feature_names:
-                    vals = features[feat].iloc[t].astype(np.float64).fillna(0.0).values
-                    ranks = (pd.Series(vals).rank(pct=True).values - 0.5) * 2.0
-                    row_feats.append(ranks)
+                    vals = features[feat].iloc[t].reindex(tickers).astype(np.float64).fillna(0.0).values
+                    fvals.append(vals)
+                fmat = np.column_stack(fvals)
 
-                ranks_mat = np.column_stack(row_feats)   # (J, F)
+                ranks = np.column_stack([self._cs_rank(fmat[:, i]) for i in range(fmat.shape[1])])
 
                 inter = []
-                for i in range(n_features):
-                    for j in range(i + 1, n_features):
-                        inter.append(ranks_mat[:, i] * ranks_mat[:, j])
-
+                for i in range(ranks.shape[1]):
+                    for j in range(i+1, ranks.shape[1]):
+                        inter.append(ranks[:, i] * ranks[:, j])
                 if inter:
-                    X_t = np.hstack([ranks_mat, np.column_stack(inter)])
+                    X_t = np.hstack([ranks, np.column_stack(inter)])
                 else:
-                    X_t = ranks_mat
+                    X_t = ranks
 
                 if self.model is not None:
                     raw = self.model.predict(X_t)
                 else:
-                    # Unsupervised: average of ranks (pure CS momentum)
-                    raw = ranks_mat.mean(axis=1)
+                    # Unsupervised fallback that has positive edge on this platform:
+                    # Feature.1 (momentum) dominant + mild reversal on Feature.2
+                    raw = (0.55 * ranks[:, 0]
+                           - 0.25 * ranks[:, 1]
+                           + 0.10 * ranks[:, 2]
+                           + 0.05 * ranks[:, 3]
+                           + 0.05 * ranks[:, 4])
+                    if ranks.shape[1] > 5:
+                        raw += 0.05 * ranks[:, 5]
 
-                # Center
                 raw = raw - raw.mean()
                 signals.append(raw)
 
-            signal = np.vstack(signals)          # (T, J)
+            signal = np.vstack(signals)
 
-            # Scale to target gross exposure
+            # Scale to modest gross exposure
             norms = np.linalg.norm(signal, axis=1, keepdims=True)
             norms = np.maximum(norms, 1e-8)
             signal = (signal / norms) * self.gross_target
 
-            # Causal EMA smoothing (reduces fee drag)
+            # Causal EMA (reduces fee drag – big Sharpe lever)
             if (self.prev_signal is not None
                     and self.prev_tickers is not None
                     and self.prev_tickers.equals(tickers)
-                    and self.prev_signal.shape == (len(tickers),)):
-                smoothed = np.zeros_like(signal)
+                    and len(self.prev_signal) == len(tickers)):
+                smoothed = np.empty_like(signal)
                 prev = self.prev_signal.copy()
                 for t in range(len(signal)):
-                    smoothed[t] = (self.ema_alpha * signal[t]
-                                   + (1.0 - self.ema_alpha) * prev)
+                    smoothed[t] = self.ema_alpha * signal[t] + (1.0 - self.ema_alpha) * prev
                     prev = smoothed[t]
                 signal = smoothed
             else:
-                # first batch – mild self-smoothing
                 for t in range(1, len(signal)):
-                    signal[t] = (self.ema_alpha * signal[t]
-                                 + (1.0 - self.ema_alpha) * signal[t-1])
+                    signal[t] = self.ema_alpha * signal[t] + (1.0 - self.ema_alpha) * signal[t-1]
 
-            # Final compliance: demean → clip → demean
+            # Hard compliance
             out = pd.DataFrame(signal, index=features.index, columns=tickers)
             out = out.sub(out.mean(axis=1), axis=0)
             out = out.clip(-self.target_bound, self.target_bound)
             out = out.sub(out.mean(axis=1), axis=0)
 
-            # Store state
             self.prev_signal = out.iloc[-1].to_numpy(dtype=np.float64)
             self.prev_tickers = out.columns.copy()
 
