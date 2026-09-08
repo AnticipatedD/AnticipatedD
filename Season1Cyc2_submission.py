@@ -10,147 +10,123 @@
 
 import numpy as np
 import pandas as pd
-from sklearn.linear_model import Ridge
 from predictor import Predictor
 
 
 class MyPredictor(Predictor):
     """
-    Fast Cross-Sectional Rank Momentum + Light Ridge.
-    Optimized to finish training in seconds, not minutes.
+    Clean & Fast Cross-Sectional Rank Momentum + Mild Reversal.
+    Optimized for AlphaNova time limits and overfitting gate.
     """
 
     def __init__(self):
         super().__init__()
         self.feature_names = None
-        self.model = None
         self.prev_signal = None
         self.prev_tickers = None
 
         self.target_bound = 0.20
         self.gross_target = 0.28
-        self.ema_alpha = 0.18
-        self.ridge_alpha = 15.0
-
-    def _cs_rank(self, x: np.ndarray) -> np.ndarray:
-        """Fast percentile rank → [-1, +1]."""
-        s = pd.Series(x)
-        r = (s.rank(pct=True, method="average") - 0.5) * 2.0
-        return r.fillna(0.0).to_numpy(dtype=np.float64)
+        self.ema_alpha = 0.15          # light smoothing
+        self.hysteresis = 0.08         # small L1 threshold
 
     def train(self, features: pd.DataFrame, target: pd.DataFrame = None) -> None:
-        if features is None or features.empty:
-            self.model = None
-            return
-
-        self.feature_names = list(features.columns.get_level_values(0).unique())
-        tickers = features.columns.get_level_values(1).unique()
-        n_assets = len(tickers)
-        n_features = len(self.feature_names)
-
-        if n_assets == 0 or n_features == 0:
-            self.model = None
-            return
-
-        # Pre-allocate
-        X_list = []
-        y_list = []
-
-        # Only loop once – keep it extremely light
-        for t in range(len(features)):
-            ranks = np.empty((n_assets, n_features), dtype=np.float64)
-
-            for i, feat in enumerate(self.feature_names):
-                vals = features[feat].iloc[t].reindex(tickers).to_numpy(dtype=np.float64)
-                ranks[:, i] = self._cs_rank(vals)
-
-            X_list.append(ranks)
-
-            if target is not None and not target.empty:
-                y_t = target.iloc[t].reindex(tickers).fillna(0.0).to_numpy(dtype=np.float64)
-                y_list.append(y_t)
-
-        if not X_list:
-            self.model = None
-            return
-
-        X = np.vstack(X_list)  # (T*J, F) – ranks only, no interactions
-
-        if y_list and len(y_list) == len(X_list):
-            y = np.concatenate(y_list)
-            self.model = Ridge(alpha=self.ridge_alpha, fit_intercept=False)
+        # Extremely light – never times out
+        if features is not None and not features.empty:
             try:
-                self.model.fit(X, y)
+                self.feature_names = list(features.columns.get_level_values(0).unique())
             except Exception:
-                self.model = None
+                self.feature_names = None
         else:
-            self.model = None
+            self.feature_names = None
 
     def predict(self, features: pd.DataFrame) -> pd.DataFrame:
-        tickers = features.columns.get_level_values(1).unique()
+        try:
+            tickers = features.columns.get_level_values(1).unique()
+        except Exception:
+            return pd.DataFrame(dtype=np.float32)
+
         zero = pd.DataFrame(0.0, index=features.index, columns=tickers, dtype=np.float32)
 
-        if features is None or features.empty or self.feature_names is None:
+        if (features is None or features.empty
+                or self.feature_names is None
+                or len(self.feature_names) < 1):
             return zero
 
         try:
-            n_features = len(self.feature_names)
-            n_assets = len(tickers)
-            signals = []
+            # -------------------------------------------------------
+            # 1. Fast vectorized cross-sectional ranks → [-1, +1]
+            # -------------------------------------------------------
+            rank_arrays = []
+            for feat in self.feature_names:
+                block = features[feat].astype(np.float64)
+                r = (block.rank(axis=1, pct=True, method="average") - 0.5) * 2.0
+                rank_arrays.append(r.fillna(0.0).to_numpy())
 
-            for t in range(len(features)):
-                ranks = np.empty((n_assets, n_features), dtype=np.float64)
+            ranks = np.stack(rank_arrays, axis=2)          # shape: (T, J, F)
+            T, J, F = ranks.shape
 
-                for i, feat in enumerate(self.feature_names):
-                    vals = features[feat].iloc[t].reindex(tickers).to_numpy(dtype=np.float64)
-                    ranks[:, i] = self._cs_rank(vals)
+            # -------------------------------------------------------
+            # 2. Simple, robust signal construction
+            #    Emphasize first feature (usually momentum)
+            # -------------------------------------------------------
+            raw = 0.60 * ranks[:, :, 0]                    # main momentum
 
-                if self.model is not None:
-                    raw = self.model.predict(ranks)
-                else:
-                    # Strong unsupervised fallback that usually has positive edge
-                    # Assumes Feature.1 is the main momentum signal
-                    raw = 0.60 * ranks[:, 0]
-                    if n_features > 1:
-                        raw -= 0.20 * ranks[:, 1]          # mild reversal
-                    if n_features > 2:
-                        raw += 0.10 * ranks[:, 2]
-                    if n_features > 3:
-                        raw += 0.05 * ranks[:, 3]
-                    if n_features > 4:
-                        raw += 0.05 * ranks[:, 4]
+            if F > 1:
+                raw -= 0.22 * ranks[:, :, 1]               # mild reversal
+            if F > 2:
+                raw += 0.10 * ranks[:, :, 2]
+            if F > 3:
+                raw += 0.05 * ranks[:, :, 3]
+            if F > 4:
+                raw += 0.03 * ranks[:, :, 4]
+            # ignore remaining features (they are often noisy)
 
-                raw = raw - np.nanmean(raw)
-                signals.append(raw)
+            # Cross-sectional demean
+            raw = raw - raw.mean(axis=1, keepdims=True)
 
-            signal = np.vstack(signals)
-
-            # Scale to target gross exposure
-            norms = np.linalg.norm(signal, axis=1, keepdims=True)
+            # -------------------------------------------------------
+            # 3. Scale to target gross exposure
+            # -------------------------------------------------------
+            norms = np.linalg.norm(raw, axis=1, keepdims=True)
             norms = np.maximum(norms, 1e-8)
-            signal = (signal / norms) * self.gross_target
+            signal = (raw / norms) * self.gross_target
 
-            # Causal EMA smoothing
+            # -------------------------------------------------------
+            # 4. Light causal EMA + small hysteresis
+            # -------------------------------------------------------
+            final = np.zeros_like(signal)
+
             if (self.prev_signal is not None
                     and self.prev_tickers is not None
-                    and self.prev_tickers.equals(tickers)
-                    and len(self.prev_signal) == len(tickers)):
-                smoothed = np.empty_like(signal)
+                    and len(self.prev_tickers) == J
+                    and self.prev_tickers.equals(tickers)):
                 prev = self.prev_signal.copy()
-                for t in range(len(signal)):
-                    smoothed[t] = self.ema_alpha * signal[t] + (1.0 - self.ema_alpha) * prev
-                    prev = smoothed[t]
-                signal = smoothed
             else:
-                for t in range(1, len(signal)):
-                    signal[t] = self.ema_alpha * signal[t] + (1.0 - self.ema_alpha) * signal[t-1]
+                prev = np.zeros(J, dtype=np.float64)
 
-            # Hard compliance
-            out = pd.DataFrame(signal, index=features.index, columns=tickers)
+            for t in range(T):
+                target = signal[t]
+
+                # Small hysteresis: only move if change is meaningful
+                if np.sum(np.abs(target - prev)) < self.hysteresis:
+                    current = prev
+                else:
+                    current = self.ema_alpha * target + (1.0 - self.ema_alpha) * prev
+                    current = current - current.mean()     # keep demeaned
+
+                final[t] = current
+                prev = current
+
+            # -------------------------------------------------------
+            # 5. Final compliance
+            # -------------------------------------------------------
+            out = pd.DataFrame(final, index=features.index, columns=tickers)
             out = out.sub(out.mean(axis=1), axis=0)
             out = out.clip(-self.target_bound, self.target_bound)
             out = out.sub(out.mean(axis=1), axis=0)
 
+            # Save state
             self.prev_signal = out.iloc[-1].to_numpy(dtype=np.float64)
             self.prev_tickers = out.columns.copy()
 
