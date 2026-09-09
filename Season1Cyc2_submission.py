@@ -2,215 +2,680 @@
 # dependencies = [
 #   "numpy",
 #   "pandas",
-#   "pyarrow"
 # ]
 # ///
+
 import numpy as np
 import pandas as pd
 from predictor import Predictor
 
+
 class MyPredictor(Predictor):
     """
-    Production-Grade Quant Strategy for AlphaNova Biweekly Tournament.
-    Implements a Cross-Sectional Non-Linear Phase-Shift Expansion with 
-    Exact L1 Turnover Hysteresis and Spherical Variance Stabilization.
+    Robust nonlinear cross-sectional ensemble.
+
+    Design:
+      - cross-sectional rank normalization
+      - training-only feature weighting
+      - bounded nonlinear basis expansion
+      - selected pairwise interactions
+      - cross-sectional neutrality
+      - adaptive concentration
+      - continuous turnover-aware execution
+
+    No future information is used by the training stage.
     """
+
     def __init__(self):
         super().__init__()
+
         self.feature_names = None
+        self.feature_weights = None
+
         self.prev_signal = None
         self.prev_tickers = None
-        
-        # Hyperparameters tuned to meet target metrics
-        self.target_bound = 0.20
-        self.optimal_concentration = 0.28  # Target concentration within [0.1, 0.5]
-        self.l1_hysteresis_threshold = 1.12  # Strict L1 turnover protection buffer
-        
-        # Values incorporated from the primary pipeline architecture
-        self.alpha = 0.1
-        self.epsilon = 1e-9
-        self.weights = None
+
+        # Portfolio constraints
+        self.position_bound = 0.20
+
+        # Adaptive concentration range
+        self.min_concentration = 0.15
+        self.max_concentration = 0.30
+
+        # Turnover controls
+        self.turnover_soft = 0.35
+        self.turnover_hard = 1.12
+
+        # Interaction controls
+        self.max_interactions = 32
+        self.interaction_weight = 0.25
+
+    # ------------------------------------------------------------------
+    # Helpers
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _safe_corr(x, y):
+        mask = np.isfinite(x) & np.isfinite(y)
+
+        if mask.sum() < 3:
+            return 0.0
+
+        x = x[mask]
+        y = y[mask]
+
+        x_std = np.std(x)
+        y_std = np.std(y)
+
+        if x_std < 1e-12 or y_std < 1e-12:
+            return 0.0
+
+        value = np.corrcoef(x, y)[0, 1]
+
+        if not np.isfinite(value):
+            return 0.0
+
+        return float(value)
+
+    @staticmethod
+    def _rank_block(block):
+        """
+        Cross-sectional percentile rank.
+        Produces approximately [-1, 1].
+        """
+        ranked = block.rank(
+            axis=1,
+            pct=True,
+            method="average",
+        )
+
+        ranked = (ranked - 0.5) * 2.0
+
+        return ranked.fillna(0.0).to_numpy(dtype=np.float64)
+
+    @staticmethod
+    def _neutralize(signal):
+        """
+        Cross-sectional dollar neutrality.
+        """
+        signal = np.asarray(signal, dtype=np.float64)
+
+        if signal.ndim != 2:
+            return signal
+
+        mean = np.mean(signal, axis=1, keepdims=True)
+
+        return signal - mean
+
+    # ------------------------------------------------------------------
+    # Training
+    # ------------------------------------------------------------------
 
     def train(self, features: pd.DataFrame, target: pd.DataFrame) -> None:
         """
-        Shuffling-gate resilient feature mapping. Extracts structural feature columns 
-        independent of time row arrangements and fits a regularized design matrix.
-        """
-        if features is None or target is None:
-            return
-            
-        self.feature_names = list(features.columns.get_level_values(0).unique())
-        
-        try:
-            # Build the engineered cross-sectional rank matrix
-            ranks = {}
-            for feat in self.feature_names:
-                block_val = features[feat].astype(np.float64)
-                r = (block_val.rank(axis=1, pct=True, method='max') - 0.5) * 2.0
-                ranks[feat] = r.fillna(0.0)
+        Learn feature weights from training data only.
 
-            # Reconstruct model interactions to calculate the design matrix coordinates
-            interaction_list = []
-            for i, f1 in enumerate(self.feature_names):
-                interaction_list.append(np.tanh(ranks[f1] * 2.0).stack(future_stack=True))
-                for j in range(i + 1, len(self.feature_names)):
-                    f2 = self.feature_names[j]
-                    term1 = np.sin(ranks[f1] * np.pi * 0.25) * np.cos(ranks[f2] * np.pi * 0.25)
-                    term2 = ranks[f1] * np.abs(ranks[f2])
-                    interaction_list.append(term1.stack(future_stack=True))
-                    interaction_list.append(term2.stack(future_stack=True))
-            
-            if not interaction_list:
+        If target structure is incompatible with the expected
+        cross-sectional format, safely fall back to equal weights.
+        """
+
+        self.feature_names = None
+        self.feature_weights = None
+
+        if features is None or len(features) == 0:
+            return
+
+        # We expect AlphaNova's usual two-level feature columns.
+        try:
+            if not isinstance(features.columns, pd.MultiIndex):
                 return
 
-            X_df = pd.concat(interaction_list, axis=1).fillna(0.0)
-            y_series = target.stack(future_stack=True).loc[X_df.index].fillna(0.0)
-            
-            X = X_df.to_numpy()
-            y = y_series.to_numpy()
-            
-            # Construct Design Matrix with Bias
-            X_bias = np.hstack([np.ones((X.shape[0], 1)), X])
-            
-            # Ridge Parameters (lambda=35.0 from the primary pipeline)
-            lambd = 35.0
-            I = np.eye(X_bias.shape[1])
-            I[0, 0] = 0.0  # Zero-out the penalty for the intercept
-            
-            # Normal Equations: (X'X + lambda*I)w = X'y
-            self.weights = np.linalg.solve(X_bias.T @ X_bias + lambd * I, X_bias.T @ y)
+            feature_level = features.columns.get_level_values(0)
+
+            self.feature_names = list(
+                pd.Index(feature_level).unique()
+            )
+
         except Exception:
-            if self.feature_names:
-                # Fallback to structural mean activation dimensions if matrix is singular
-                num_features = len(self.feature_names)
-                total_dims = num_features + 2 * (num_features * (num_features - 1) // 2)
-                self.weights = np.zeros(total_dims + 1)
+            self.feature_names = None
+            return
+
+        if not self.feature_names:
+            return
+
+        # Default = equal weighting.
+        weights = np.ones(len(self.feature_names), dtype=np.float64)
+
+        # --------------------------------------------------------------
+        # Attempt training-only target alignment.
+        # --------------------------------------------------------------
+
+        try:
+            if target is None or len(target) == 0:
+                self.feature_weights = weights / np.sum(weights)
+                return
+
+            # Align target rows to features.
+            common_index = features.index.intersection(target.index)
+
+            if len(common_index) < 3:
+                self.feature_weights = weights / np.sum(weights)
+                return
+
+            f_train = features.loc[common_index]
+            t_train = target.loc[common_index]
+
+            # Convert target into a usable numeric matrix.
+            if isinstance(t_train, pd.DataFrame):
+                target_numeric = t_train.apply(
+                    pd.to_numeric,
+                    errors="coerce",
+                )
+            else:
+                target_numeric = pd.DataFrame(t_train)
+
+            # Use the first numeric target representation if available.
+            target_values = target_numeric.to_numpy(dtype=np.float64)
+
+            if target_values.ndim == 1:
+                target_values = target_values[:, None]
+
+            # Aggregate target cross-sectionally when necessary.
+            target_series = np.nanmean(target_values, axis=1)
+
+            scores = []
+
+            for feat in self.feature_names:
+                try:
+                    block = f_train[feat].apply(
+                        pd.to_numeric,
+                        errors="coerce",
+                    )
+
+                    ranked = self._rank_block(block)
+
+                    # Median cross-sectional association.
+                    row_scores = []
+
+                    for t in range(len(ranked)):
+                        corr = self._safe_corr(
+                            ranked[t],
+                            np.repeat(
+                                target_series[t],
+                                ranked.shape[1],
+                            ),
+                        )
+
+                        # Constant target rows naturally return 0.
+                        row_scores.append(corr)
+
+                    score = np.nanmedian(row_scores)
+
+                    if not np.isfinite(score):
+                        score = 0.0
+
+                    scores.append(score)
+
+                except Exception:
+                    scores.append(0.0)
+
+            scores = np.asarray(scores, dtype=np.float64)
+
+            # ----------------------------------------------------------
+            # Stable soft weighting.
+            #
+            # sqrt(|score|) prevents one noisy feature from dominating.
+            # Sign is retained.
+            # ----------------------------------------------------------
+
+            magnitude = np.sqrt(np.abs(scores))
+
+            if np.sum(magnitude) > 1e-12:
+                weights = np.sign(scores) * magnitude
+
+                # If all scores are effectively zero, equal weighting.
+                if np.sum(np.abs(weights)) < 1e-12:
+                    weights = np.ones_like(weights)
+            else:
+                weights = np.ones_like(weights)
+
+        except Exception:
+            # Training must never prevent predictor construction.
+            weights = np.ones(len(self.feature_names), dtype=np.float64)
+
+        denom = np.sum(np.abs(weights))
+
+        if denom < 1e-12:
+            weights = np.ones(len(self.feature_names), dtype=np.float64)
+            denom = float(len(self.feature_names))
+
+        self.feature_weights = weights / denom
+
+    # ------------------------------------------------------------------
+    # Prediction
+    # ------------------------------------------------------------------
 
     def predict(self, features: pd.DataFrame) -> pd.DataFrame:
-        tickers = features.columns.get_level_values(1).unique()
-        zero_signal = pd.DataFrame(0.0, index=features.index, columns=tickers, dtype=np.float32)
-        
-        if len(features) == 0 or not self.feature_names or len(self.feature_names) < 2:
+
+        # --------------------------------------------------------------
+        # Validate columns first.
+        # --------------------------------------------------------------
+
+        if features is None:
+            return pd.DataFrame()
+
+        try:
+            if not isinstance(features.columns, pd.MultiIndex):
+                raise ValueError(
+                    "Expected a MultiIndex feature DataFrame."
+                )
+
+            tickers = features.columns.get_level_values(1).unique()
+
+        except Exception as exc:
+            raise RuntimeError(
+                f"Invalid AlphaNova feature structure: {exc}"
+            ) from exc
+
+        zero_signal = pd.DataFrame(
+            0.0,
+            index=features.index,
+            columns=tickers,
+            dtype=np.float32,
+        )
+
+        if len(features) == 0:
             return zero_signal
-            
+
+        if not self.feature_names:
+            return zero_signal
+
+        # --------------------------------------------------------------
+        # Build rank representation.
+        # --------------------------------------------------------------
+
+        ranks = {}
+
         try:
-            # 1. Row-Wise Cross-Sectional Rank Transform (Guarantees Shuffling Immunity)
-            ranks = {}
             for feat in self.feature_names:
-                block_val = features[feat].astype(np.float64)
-                # Max-ranking handles zero-variance or flat warm-up rows without breakdown
-                r = (block_val.rank(axis=1, pct=True, method='max') - 0.5) * 2.0
-                ranks[feat] = r.fillna(0.0).to_numpy()
 
-            N_time, J_assets = list(ranks.values())[0].shape
-            
-            # 2. Non-Linear Spatial Expansion (Drives City > 64° and Global > 81°)
-            # Linear metrics carry no edge due to the obfuscated target structure.
-            interaction_blocks = []
-            
-            for i in range(len(self.feature_names)):
-                f1 = self.feature_names[i]
-                # Bounded non-linear activation
-                interaction_blocks.append(np.tanh(ranks[f1] * 2.0))
-                
-                for j in range(i + 1, len(self.feature_names)):
-                    f2 = self.feature_names[j]
-                    # Dynamic phase-shifted combinations to step outside standard tracking clusters
-                    interaction_blocks.append(np.sin(ranks[f1] * np.pi * 0.25) * np.cos(ranks[f2] * np.pi * 0.25))
-                    interaction_blocks.append(ranks[f1] * np.abs(ranks[f2]))
-            
-            # Extract consensus signal velocity across orthogonal components
-            if self.weights is not None and len(self.weights) == len(interaction_blocks) + 1:
-                # Apply learned coefficients from the regularized ridge architecture
-                raw_velocity = np.zeros((N_time, J_assets)) + self.weights[0]  # Intercept
-                for idx, block in enumerate(interaction_blocks):
-                    raw_velocity += block * self.weights[idx + 1]
+                if feat not in features.columns.get_level_values(0):
+                    continue
+
+                block = features[feat].apply(
+                    pd.to_numeric,
+                    errors="coerce",
+                )
+
+                ranks[feat] = self._rank_block(block)
+
+        except Exception as exc:
+            raise RuntimeError(
+                f"Feature rank transformation failed: {exc}"
+            ) from exc
+
+        if len(ranks) == 0:
+            return zero_signal
+
+        N_time, N_assets = next(iter(ranks.values())).shape
+
+        # --------------------------------------------------------------
+        # Feature weights.
+        # --------------------------------------------------------------
+
+        if (
+            self.feature_weights is None
+            or len(self.feature_weights) != len(self.feature_names)
+        ):
+            weights = np.ones(
+                len(self.feature_names),
+                dtype=np.float64,
+            )
+            weights /= np.sum(np.abs(weights))
+        else:
+            weights = self.feature_weights
+
+        weight_map = {
+            feat: weights[i]
+            for i, feat in enumerate(self.feature_names)
+        }
+
+        # --------------------------------------------------------------
+        # Nonlinear feature ensemble.
+        # --------------------------------------------------------------
+
+        feature_components = []
+
+        for feat in self.feature_names:
+
+            if feat not in ranks:
+                continue
+
+            r = ranks[feat]
+            w = weight_map.get(feat, 0.0)
+
+            # Odd nonlinear component.
+            odd = np.tanh(2.0 * r)
+
+            # Centered even component.
+            even = r * r
+            even -= np.mean(even, axis=1, keepdims=True)
+
+            # Cubic directional response.
+            cubic = r ** 3
+
+            # Smooth periodic component.
+            periodic = np.sin(
+                0.5 * np.pi * r
+            )
+
+            component = (
+                0.40 * odd
+                + 0.20 * even
+                + 0.20 * cubic
+                + 0.20 * periodic
+            )
+
+            feature_components.append(
+                w * component
+            )
+
+        if not feature_components:
+            return zero_signal
+
+        raw_signal = np.sum(
+            feature_components,
+            axis=0,
+        )
+
+        # --------------------------------------------------------------
+        # Controlled pairwise interactions.
+        # --------------------------------------------------------------
+
+        interaction_candidates = []
+
+        active_features = [
+            f for f in self.feature_names
+            if f in ranks
+        ]
+
+        for i in range(len(active_features)):
+
+            f1 = active_features[i]
+            r1 = ranks[f1]
+
+            for j in range(i + 1, len(active_features)):
+
+                f2 = active_features[j]
+                r2 = ranks[f2]
+
+                # Bounded multiplicative interaction.
+                interaction = np.tanh(
+                    2.0 * r1 * r2
+                )
+
+                # Measure whether the interaction actually
+                # has cross-sectional dispersion.
+                quality = float(
+                    np.mean(
+                        np.abs(interaction)
+                    )
+                )
+
+                interaction_candidates.append(
+                    (
+                        quality,
+                        f1,
+                        f2,
+                        interaction,
+                    )
+                )
+
+        # Retain only the most active interactions.
+        interaction_candidates.sort(
+            key=lambda x: x[0],
+            reverse=True,
+        )
+
+        selected = interaction_candidates[
+            : self.max_interactions
+        ]
+
+        if selected:
+
+            interaction_sum = np.zeros_like(
+                raw_signal,
+                dtype=np.float64,
+            )
+
+            total_quality = 0.0
+
+            for quality, f1, f2, interaction in selected:
+
+                if quality <= 1e-12:
+                    continue
+
+                w1 = abs(weight_map.get(f1, 0.0))
+                w2 = abs(weight_map.get(f2, 0.0))
+
+                pair_weight = np.sqrt(
+                    max(w1 * w2, 0.0)
+                )
+
+                contribution = (
+                    interaction
+                    * pair_weight
+                    * quality
+                )
+
+                interaction_sum += contribution
+                total_quality += quality
+
+            if total_quality > 1e-12:
+
+                interaction_sum /= total_quality
+
+                raw_signal += (
+                    self.interaction_weight
+                    * interaction_sum
+                )
+
+        # --------------------------------------------------------------
+        # Cross-sectional neutrality.
+        # --------------------------------------------------------------
+
+        raw_signal = self._neutralize(
+            raw_signal
+        )
+
+        # --------------------------------------------------------------
+        # Robust row normalization.
+        # --------------------------------------------------------------
+
+        scale = np.sqrt(
+            np.mean(
+                raw_signal ** 2,
+                axis=1,
+                keepdims=True,
+            )
+        )
+
+        scale = np.maximum(
+            scale,
+            1e-10,
+        )
+
+        normalized = raw_signal / scale
+
+        # --------------------------------------------------------------
+        # Adaptive concentration.
+        # --------------------------------------------------------------
+
+        abs_mean = np.mean(
+            np.abs(raw_signal),
+            axis=1,
+            keepdims=True,
+        )
+
+        abs_median = np.median(
+            np.abs(raw_signal),
+            axis=1,
+            keepdims=True,
+        )
+
+        quality = abs_median / (
+            abs_mean + 1e-10
+        )
+
+        quality = np.clip(
+            quality,
+            0.0,
+            1.0,
+        )
+
+        concentration = (
+            self.min_concentration
+            + (
+                self.max_concentration
+                - self.min_concentration
+            )
+            * quality
+        )
+
+        target_positions = (
+            normalized
+            * concentration
+        )
+
+        # Hard position protection.
+        target_positions = np.clip(
+            target_positions,
+            -self.position_bound,
+            self.position_bound,
+        )
+
+        target_positions = self._neutralize(
+            target_positions
+        )
+
+        # --------------------------------------------------------------
+        # Stateful turnover-aware execution.
+        # --------------------------------------------------------------
+
+        final_positions = np.zeros_like(
+            target_positions,
+            dtype=np.float64,
+        )
+
+        if (
+            self.prev_signal is not None
+            and self.prev_tickers is not None
+            and len(self.prev_signal) == N_assets
+            and self.prev_tickers.equals(tickers)
+        ):
+            active = self.prev_signal.copy()
+        else:
+            active = np.zeros(
+                N_assets,
+                dtype=np.float64,
+            )
+
+        for t in range(N_time):
+
+            desired = target_positions[t]
+
+            turnover = np.sum(
+                np.abs(
+                    desired - active
+                )
+            )
+
+            if turnover <= self.turnover_soft:
+
+                # Small movement: preserve previous portfolio.
+                alpha = 0.0
+
+            elif turnover >= self.turnover_hard:
+
+                # Large movement: move meaningfully,
+                # but don't jump directly to the target.
+                alpha = 0.35
+
             else:
-                raw_velocity = np.mean(interaction_blocks, axis=0)
-            
-            # 3. Geometric Subspace Demean & Hypersphere S^{J-2} Projection
-            # Strictly eliminate systematic market exposure row by row
-            velocity_demeaned = raw_velocity - raw_velocity.mean(axis=1, keepdims=True)
-            
-            # Spherical normalization
-            norms = np.linalg.norm(velocity_demeaned, axis=1, keepdims=True)
-            norms[norms < self.epsilon] = 1.0
-            sphere_target = (velocity_demeaned / norms) * self.optimal_concentration
-            
-            # 4. Execution Filter: L1 Causal Hysteresis Loop
-            final_positions = np.zeros_like(sphere_target)
-            
-            # Ensure continuity during streaming or evaluation state shifts
-            if (
-                self.prev_signal is not None 
-                and self.prev_tickers is not None 
-                and self.prev_signal.shape == (J_assets,)
-                and self.prev_tickers.equals(tickers)
-            ):
-                active_position = self.prev_signal.copy()
-            else:
-                active_position = np.zeros(J_assets, dtype=np.float64)
-            
-            for t in range(N_time):
-                target_position = sphere_target[t]
-                
-                # Check the exact structural L1 distance to neutralize the 5bp fee drag
-                l1_allocation_delta = np.sum(np.abs(target_position - active_position))
-                
-                if l1_allocation_delta < self.l1_hysteresis_threshold:
-                    # Inside the band: Maintain active position to reduce churn costs to ~1%
-                    current_allocation = active_position.copy()
-                else:
-                    # Outside the band: Smooth execution adjustment for optimized path decay (using alpha smoothing logic)
-                    current_allocation = self.alpha * target_position + (1 - self.alpha) * active_position
-                    current_allocation -= current_allocation.mean()  # Re-verify dollar neutrality
-                
-                final_positions[t] = current_allocation
-                active_position = current_allocation.copy()
-                
-            # 5. Compliance Formatting & Final Re-Centering
-            final_df = pd.DataFrame(final_positions, index=features.index, columns=tickers)
-            
-            # Enforce zero cross-sectional sum and hard boundary limits
-            final_df = final_df.sub(final_df.mean(axis=1), axis=0)
-            final_df = final_df.clip(-self.target_bound, self.target_bound)
-            final_df = final_df.sub(final_df.mean(axis=1), axis=0)
-            
-            # Store state snapshot for downstream blocks
-            self.prev_signal = final_df.iloc[-1].to_numpy(dtype=np.float64)
-            self.prev_tickers = final_df.columns.copy()
-            
-            return final_df.astype(np.float32)
-            
-        except Exception:
-            return zero_signal 
 
-    def novelty_check(self, candidate_vectors: np.ndarray, lat_lon_to_unit: bool = False) -> np.ndarray:
-        """
-        Geographic novelty-check utility to detect signal redundancy.
-        
-        Computes the nearest neighbor via angular distance (1 - dot product) 
-        against global signal city reference data.
-        """
-        import pyarrow.parquet as pq
-        
-        try:
-            # Load internal reference data
-            city_data = pd.read_parquet("data/signal_cities.parquet")
-            reference_vectors = city_data[['x', 'y', 'z']].to_numpy()
-        except Exception:
-            # Operational fallback
-            return np.zeros(len(candidate_vectors))
+                # Continuous transition.
+                alpha = 0.35 * (
+                    (turnover - self.turnover_soft)
+                    / (
+                        self.turnover_hard
+                        - self.turnover_soft
+                    )
+                )
 
-        processed_candidates = candidate_vectors
-        if lat_lon_to_unit:
-            rad = np.radians(candidate_vectors)
-            lat, lon = rad[:, 0], rad[:, 1]
-            
-            x = np.cos(lat) * np.cos(lon)
-            y = np.cos(lat) * np.sin(lon)
-            z = np.sin(lat)
-            processed_candidates = np.stack([x, y, z], axis=1)
+            current = (
+                (1.0 - alpha) * active
+                + alpha * desired
+            )
 
-        dot_products = processed_candidates @ reference_vectors.T
-max_similarity = np.max(dot_products, axis=1)return 1.0 - max_similarity
+            # Maintain neutrality after execution.
+            current -= np.mean(current)
+
+            # Maintain hard position constraint.
+            current = np.clip(
+                current,
+                -self.position_bound,
+                self.position_bound,
+            )
+
+            # Re-center after clipping.
+            current -= np.mean(current)
+
+            final_positions[t] = current
+            active = current.copy()
+
+        # --------------------------------------------------------------
+        # Final safety validation.
+        # --------------------------------------------------------------
+
+        final_df = pd.DataFrame(
+            final_positions,
+            index=features.index,
+            columns=tickers,
+        )
+
+        final_df = final_df.replace(
+            [np.inf, -np.inf],
+            0.0,
+        ).fillna(0.0)
+
+        final_df = final_df.sub(
+            final_df.mean(axis=1),
+            axis=0,
+        )
+
+        final_df = final_df.clip(
+            -self.position_bound,
+            self.position_bound,
+        )
+
+        final_df = final_df.sub(
+            final_df.mean(axis=1),
+            axis=0,
+        )
+
+        # --------------------------------------------------------------
+        # Preserve causal state.
+        # --------------------------------------------------------------
+
+        if len(final_df) > 0:
+
+            self.prev_signal = (
+                final_df.iloc[-1]
+                .to_numpy(dtype=np.float64)
+            )
+
+            self.prev_tickers = (
+                final_df.columns.copy()
+            )
+
+        return final_df.astype(np.float32)
