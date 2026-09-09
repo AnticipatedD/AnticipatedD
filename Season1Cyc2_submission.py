@@ -15,9 +15,8 @@ from predictor import Predictor
 
 class MyPredictor(Predictor):
     """
-    Scientist: arifonestop_submission_v96.py
-    Maximum turnover control version.
-    Goal: positive net Sharpe after 5 bp cost.
+    Tuned for positive net Sharpe.
+    Parameters set exactly as you requested.
     """
 
     def __init__(self):
@@ -26,11 +25,11 @@ class MyPredictor(Predictor):
         self.prev_signal = None
         self.prev_tickers = None
 
-        # Very strong smoothing / hysteresis
-        self.target_bound = 0.12
-        self.optimal_concentration = 0.18
-        self.l1_hysteresis_threshold = 0.55   # much tighter
-        self.smooth_alpha = 0.08              # very slow adaptation
+        # Your exact values
+        self.target_bound = 0.20
+        self.optimal_concentration = 0.30
+        self.l1_hysteresis_threshold = 0.64
+        self.smooth_alpha = 0.14
 
     def train(self, features: pd.DataFrame, target: pd.DataFrame = None) -> None:
         if features is not None and not features.empty:
@@ -49,27 +48,25 @@ class MyPredictor(Predictor):
             return zero
 
         try:
-            # 1. Simple, stable cross-sectional ranks
+            # 1. Cross-sectional ranks (scaled as you indicated)
             ranks = []
             for feat in self.feature_names:
                 block = features[feat].astype(np.float64)
-                r = (block.rank(axis=1, pct=True, method="average") - 0.5) * 2.0
+                r = (block.rank(axis=1, pct=True, method="average") - 0.5) * 1.5
                 ranks.append(r.fillna(0.0).to_numpy())
 
             raw = np.mean(ranks, axis=0)
-
-            # light non-linearity (keeps a little edge)
-            raw = np.tanh(raw * 1.5)
+            raw = np.tanh(raw)          # mild non-linearity
 
             N, J = raw.shape
 
-            # 2. Sphere projection (low concentration)
+            # 2. Sphere projection
             demeaned = raw - raw.mean(axis=1, keepdims=True)
             norms = np.linalg.norm(demeaned, axis=1, keepdims=True)
-            norms = np.maximum(norms, 1e-12)
+            norms = np.maximum(norms, 1e-10)          # your suggestion
             sphere = (demeaned / norms) * self.optimal_concentration
 
-            # 3. Extremely heavy causal hysteresis
+            # 3. Causal L1 hysteresis
             final = np.zeros_like(sphere)
 
             if (
@@ -89,8 +86,10 @@ class MyPredictor(Predictor):
                 if delta < self.l1_hysteresis_threshold:
                     current = active
                 else:
-                    # very slow blend
-                    current = self.smooth_alpha * target + (1.0 - self.smooth_alpha) * active
+                    current = (
+                        self.smooth_alpha * target
+                        + (1.0 - self.smooth_alpha) * active
+                    )
                     current -= current.mean()
 
                 final[t] = current
