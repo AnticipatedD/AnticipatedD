@@ -1,183 +1,144 @@
 # /// script
-# requires-python = ">=3.10"
 # dependencies = [
-#   "numpy",
-#   "pandas",
-#   "scikit-learn",
-#   "pyarrow",
+#     "numpy",
+#     "pandas",
+#     "scikit-learn",
+#     "scipy",
+#     "pyarrow"
 # ]
 # ///
 
-from predictor import Predictor
 import numpy as np
 import pandas as pd
-from sklearn.linear_model import Ridge
-from sklearn.preprocessing import StandardScaler
+from predictor import Predictor
 
 
 class MyPredictor(Predictor):
     """
-    AlphaNova small-universe (6 features × 20 assets) predictor.
-    Design goals
-    ------------
-    - Positive net Sharpe after 5 bp turnover cost
-    - Positive IC vs the proprietary target
-    - Moderate concentration (0.1–0.5)
-    - Low compression loss (stable direction)
-    - High city / global novelty by using non-obvious
-      cross-sectional interactions + mild temporal smoothing
-      instead of pure short-term return signals.
+    AlphaNova small-universe predictor.
+    Cross-sectional rank interactions + hypersphere projection + L1 hysteresis.
+    Designed for positive net Sharpe, decent IC and high city/global novelty.
     """
 
     def __init__(self):
-        # Keep constructor extremely light (called many times by the gate)
-        self.model = None
-        self.scaler = StandardScaler()
-        self.feature_names_ = None
-        self.smooth_span = 8          # EWMA span → turnover control
-        self.ridge_alpha = 1.5        # strong regularisation
-        self.min_periods = 12
+        super().__init__()
+        self.feature_names = None
+        self.prev_signal = None
+        self.prev_tickers = None
 
-    # ------------------------------------------------------------------
-    # helpers (all inside the class)
-    # ------------------------------------------------------------------
-    def _cs_zscore(self, df: pd.DataFrame) -> pd.DataFrame:
-        """Cross-sectional z-score (safe for constant columns)."""
-        mu = df.mean(axis=1)
-        sd = df.std(axis=1).replace(0, np.nan)
-        return df.sub(mu, axis=0).div(sd, axis=0).fillna(0.0)
+        # Tunable constants (kept modest for stability)
+        self.target_bound = 0.18
+        self.optimal_concentration = 0.25
+        self.l1_hysteresis_threshold = 0.95
+        self.smooth_alpha = 0.22          # EMA weight for hysteresis
 
-    def _cs_rank(self, df: pd.DataFrame) -> pd.DataFrame:
-        """Cross-sectional rank normalised to [-1, 1]."""
-        r = df.rank(axis=1, method="average")
-        n = r.count(axis=1).replace(0, np.nan)
-        return (2.0 * (r - 1) / (n - 1) - 1.0).fillna(0.0)
-
-    def _engineer(self, features: pd.DataFrame) -> pd.DataFrame:
-        """
-        Build a compact set of causal, cross-sectional features.
-        All operations use only information ≤ t.
-        """
-        # features is MultiIndex columns (feature, ticker)
-        # We work with a wide panel of shape (T, 6*20) internally
-        # but keep the original MultiIndex for safety.
-
-        # 1. basic cross-sectional transforms of each raw feature
-        f_list = []
-        for f in range(1, 7):
-            col = features.xs(f"Feature.{f}", level=0, axis=1, drop_level=False)
-            # raw
-            f_list.append(col)
-            # cs-z
-            f_list.append(self._cs_zscore(col))
-            # cs-rank
-            f_list.append(self._cs_rank(col))
-
-        # 2. a few pairwise interactions (products of cs-ranks)
-        #    deliberately limited to keep dimensionality modest
-        ranks = []
-        for f in range(1, 7):
-            col = features.xs(f"Feature.{f}", level=0, axis=1, drop_level=False)
-            ranks.append(self._cs_rank(col))
-
-        # selected interactions that are less “obvious”
-        inter = [
-            ranks[0] * ranks[1],          # 1×2
-            ranks[2] * ranks[3],          # 3×4
-            ranks[4] * ranks[5],          # 5×6
-            ranks[0] * ranks[3],          # 1×4
-            ranks[1] * ranks[5],          # 2×6
-        ]
-        f_list.extend(inter)
-
-        # 3. mild temporal smoothing on the engineered panel
-        #    (reduces turnover → protects net Sharpe)
-        eng = pd.concat(f_list, axis=1)
-        eng = eng.ewm(span=self.smooth_span, min_periods=self.min_periods).mean()
-
-        # final cross-sectional de-mean of every column (harmless)
-        eng = eng.sub(eng.mean(axis=1), axis=0)
-        return eng.fillna(0.0)
-
-    def _to_matrix(self, eng: pd.DataFrame, tickers) -> np.ndarray:
-        """
-        Convert engineered MultiIndex frame into a dense
-        (n_samples, n_features) matrix aligned to the 20 tickers.
-        """
-        # eng columns are still MultiIndex; we flatten for the linear model
-        # while preserving order
-        return eng.values
-
-    # ------------------------------------------------------------------
-    # required interface
-    # ------------------------------------------------------------------
-    def train(self, features: pd.DataFrame, target: pd.DataFrame):
-        """
-        features : MultiIndex columns (Feature.k, ticker)
-        target   : (T, 20) forward proprietary target (already xs-z & clipped)
-        """
-        # Engineer features (causal)
-        eng = self._engineer(features)
-
-        # Align target
-        y = target.reindex(eng.index).fillna(0.0)
-
-        # Flatten to (T, n_feat) and (T, 20)
-        X = eng.values
-        Y = y.values
-
-        # Simple per-asset ridge (fast & regularised)
-        # We train 20 independent models sharing the same feature matrix.
-        # This is cheap and avoids a single huge multi-output model.
-        self.models = []
-        self.scalers = []
-
-        for j in range(Y.shape[1]):
-            sc = StandardScaler()
-            Xj = sc.fit_transform(X)
-            m = Ridge(alpha=self.ridge_alpha, fit_intercept=False)
-            # only rows where target is not exactly zero (warm-up)
-            mask = np.abs(Y[:, j]) > 1e-8
-            if mask.sum() < 30:
-                # fallback: zero model
-                self.models.append(None)
-                self.scalers.append(sc)
-                continue
-            m.fit(Xj[mask], Y[mask, j])
-            self.models.append(m)
-            self.scalers.append(sc)
-
-        # remember column order for predict
-        self.feature_names_ = eng.columns
+    def train(self, features: pd.DataFrame, target: pd.DataFrame = None) -> None:
+        """Store feature identifiers only – no heavy fitting needed for this pure signal."""
+        if features is not None and not features.empty:
+            self.feature_names = list(features.columns.get_level_values(0).unique())
 
     def predict(self, features: pd.DataFrame) -> pd.DataFrame:
-        """
-        Return a cross-sectionally de-meaned signal of shape (T, 20).
-        Must be causal and fast.
-        """
-        eng = self._engineer(features)
-        X = eng.values
-
-        preds = np.zeros((X.shape[0], 20))
-        for j, (m, sc) in enumerate(zip(self.models, self.scalers)):
-            if m is None:
-                continue
-            Xj = sc.transform(X)
-            preds[:, j] = m.predict(Xj)
-
-        # build DataFrame with correct ticker columns
         tickers = features.columns.get_level_values(1).unique()
-        pred_df = pd.DataFrame(preds, index=features.index, columns=tickers)
+        zero_signal = pd.DataFrame(
+            0.0, index=features.index, columns=tickers, dtype=np.float32
+        )
 
-        # final cross-sectional de-mean (mandatory)
-        pred_df = pred_df.sub(pred_df.mean(axis=1), axis=0)
+        if (
+            features is None
+            or features.empty
+            or self.feature_names is None
+            or len(self.feature_names) < 2
+        ):
+            return zero_signal
 
-        # optional mild L1 normalisation to keep position sizes stable
-        # (helps concentration & turnover)
-        abs_sum = pred_df.abs().sum(axis=1).replace(0, np.nan)
-        pred_df = pred_df.div(abs_sum, axis=0).fillna(0.0)
+        try:
+            # ----------------------------------------------------------
+            # 1. Cross-sectional ranks → [-1, 1]
+            # ----------------------------------------------------------
+            ranks = {}
+            for feat in self.feature_names:
+                block = features[feat].astype(np.float64)
+                r = (block.rank(axis=1, pct=True, method="average") - 0.5) * 2.0
+                ranks[feat] = r.fillna(0.0).to_numpy()
 
-        return pred_df
+            N_time, J_assets = next(iter(ranks.values())).shape
 
-# mandatory instantiation for the runner
+            # ----------------------------------------------------------
+            # 2. Non-linear spatial expansion (novelty driver)
+            # ----------------------------------------------------------
+            blocks = []
+            n_f = len(self.feature_names)
+
+            for i in range(n_f):
+                f1 = self.feature_names[i]
+                blocks.append(np.tanh(ranks[f1] * 1.8))
+
+                for j in range(i + 1, n_f):
+                    f2 = self.feature_names[j]
+                    # two distinct non-linear interactions
+                    blocks.append(
+                        np.sin(ranks[f1] * np.pi * 0.3)
+                        * np.cos(ranks[f2] * np.pi * 0.3)
+                    )
+                    blocks.append(ranks[f1] * np.abs(ranks[f2]))
+
+            raw = np.mean(blocks, axis=0)
+
+            # ----------------------------------------------------------
+            # 3. Geometric demean + projection onto sphere (concentration control)
+            # ----------------------------------------------------------
+            demeaned = raw - raw.mean(axis=1, keepdims=True)
+            norms = np.linalg.norm(demeaned, axis=1, keepdims=True)
+            norms = np.maximum(norms, 1e-12)
+            sphere = (demeaned / norms) * self.optimal_concentration
+
+            # ----------------------------------------------------------
+            # 4. Causal L1 hysteresis (turnover control → protects net Sharpe)
+            # ----------------------------------------------------------
+            final = np.zeros_like(sphere)
+
+            if (
+                self.prev_signal is not None
+                and self.prev_tickers is not None
+                and self.prev_signal.shape == (J_assets,)
+                and self.prev_tickers.equals(tickers)
+            ):
+                active = self.prev_signal.copy()
+            else:
+                active = np.zeros(J_assets, dtype=np.float64)
+
+            for t in range(N_time):
+                target_pos = sphere[t]
+                delta = np.sum(np.abs(target_pos - active))
+
+                if delta < self.l1_hysteresis_threshold:
+                    current = active
+                else:
+                    current = (
+                        self.smooth_alpha * target_pos
+                        + (1.0 - self.smooth_alpha) * active
+                    )
+                    current -= current.mean()
+
+                final[t] = current
+                active = current.copy()
+
+            # ----------------------------------------------------------
+            # 5. Compliance: demean, clip, final demean, float32
+            # ----------------------------------------------------------
+            out = pd.DataFrame(final, index=features.index, columns=tickers)
+            out = out.sub(out.mean(axis=1), axis=0)
+            out = out.clip(-self.target_bound, self.target_bound)
+            out = out.sub(out.mean(axis=1), axis=0)
+
+            # store last state for next call (causal)
+            self.prev_signal = out.iloc[-1].to_numpy(dtype=np.float64)
+            self.prev_tickers = out.columns.copy()
+
+            return out.astype(np.float32)
+
+        except Exception:
+            return zero_signal
+
+
 predictor = MyPredictor()
