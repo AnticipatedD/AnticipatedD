@@ -1,367 +1,183 @@
 # /// script
+# requires-python = ">=3.10"
 # dependencies = [
-#     "numpy",
-#     "pandas",
-#     "scikit-learn",
-#     "scipy",
-#     "pyarrow"
+#   "numpy",
+#   "pandas",
+#   "scikit-learn",
+#   "pyarrow",
 # ]
 # ///
 
+from predictor import Predictor
 import numpy as np
 import pandas as pd
-from predictor import Predictor
+from sklearn.linear_model import Ridge
+from sklearn.preprocessing import StandardScaler
 
 
 class MyPredictor(Predictor):
     """
-    Stable cross-sectional rank ensemble.
-
-    Main changes from the previous version:
-      - continuous causal smoothing instead of hard L1 hysteresis
-      - robust rank normalization
-      - nonlinear transforms kept bounded
-      - adaptive feature weighting from cross-sectional dispersion
-      - explicit volatility normalization
-      - no look-ahead
+    AlphaNova small-universe (6 features × 20 assets) predictor.
+    Design goals
+    ------------
+    - Positive net Sharpe after 5 bp turnover cost
+    - Positive IC vs the proprietary target
+    - Moderate concentration (0.1–0.5)
+    - Low compression loss (stable direction)
+    - High city / global novelty by using non-obvious
+      cross-sectional interactions + mild temporal smoothing
+      instead of pure short-term return signals.
     """
 
     def __init__(self):
-        super().__init__()
+        # Keep constructor extremely light (called many times by the gate)
+        self.model = None
+        self.scaler = StandardScaler()
+        self.feature_names_ = None
+        self.smooth_span = 8          # EWMA span → turnover control
+        self.ridge_alpha = 1.5        # strong regularisation
+        self.min_periods = 12
 
-        self.feature_names = None
+    # ------------------------------------------------------------------
+    # helpers (all inside the class)
+    # ------------------------------------------------------------------
+    def _cs_zscore(self, df: pd.DataFrame) -> pd.DataFrame:
+        """Cross-sectional z-score (safe for constant columns)."""
+        mu = df.mean(axis=1)
+        sd = df.std(axis=1).replace(0, np.nan)
+        return df.sub(mu, axis=0).div(sd, axis=0).fillna(0.0)
 
-        self.prev_signal = None
-        self.prev_tickers = None
+    def _cs_rank(self, df: pd.DataFrame) -> pd.DataFrame:
+        """Cross-sectional rank normalised to [-1, 1]."""
+        r = df.rank(axis=1, method="average")
+        n = r.count(axis=1).replace(0, np.nan)
+        return (2.0 * (r - 1) / (n - 1) - 1.0).fillna(0.0)
 
-        # Portfolio controls
-        self.target_bound = 0.20
-        self.target_l2 = 0.27
-
-        # Causal smoothing.
-        # Higher = more responsive.
-        self.ema_alpha = 0.32
-
-        # Small turnover stabilizer.
-        self.min_change = 0.015
-
-    def train(
-        self,
-        features: pd.DataFrame,
-        target: pd.DataFrame = None
-    ) -> None:
-
-        if features is None or features.empty:
-            return
-
-        try:
-            self.feature_names = list(
-                features.columns.get_level_values(0).unique()
-            )
-        except Exception:
-            self.feature_names = None
-
-    @staticmethod
-    def _rank(x):
+    def _engineer(self, features: pd.DataFrame) -> pd.DataFrame:
         """
-        Cross-sectional percentile rank mapped to [-1, 1].
+        Build a compact set of causal, cross-sectional features.
+        All operations use only information ≤ t.
         """
-        r = x.rank(
-            axis=1,
-            pct=True,
-            method="average"
-        )
+        # features is MultiIndex columns (feature, ticker)
+        # We work with a wide panel of shape (T, 6*20) internally
+        # but keep the original MultiIndex for safety.
 
-        return ((r - 0.5) * 2.0).fillna(0.0)
+        # 1. basic cross-sectional transforms of each raw feature
+        f_list = []
+        for f in range(1, 7):
+            col = features.xs(f"Feature.{f}", level=0, axis=1, drop_level=False)
+            # raw
+            f_list.append(col)
+            # cs-z
+            f_list.append(self._cs_zscore(col))
+            # cs-rank
+            f_list.append(self._cs_rank(col))
 
-    @staticmethod
-    def _demean(x):
-        return x - x.mean(axis=1, keepdims=True)
+        # 2. a few pairwise interactions (products of cs-ranks)
+        #    deliberately limited to keep dimensionality modest
+        ranks = []
+        for f in range(1, 7):
+            col = features.xs(f"Feature.{f}", level=0, axis=1, drop_level=False)
+            ranks.append(self._cs_rank(col))
 
-    @staticmethod
-    def _normalize_l2(x, target):
-        x = MyPredictor._demean(x)
+        # selected interactions that are less “obvious”
+        inter = [
+            ranks[0] * ranks[1],          # 1×2
+            ranks[2] * ranks[3],          # 3×4
+            ranks[4] * ranks[5],          # 5×6
+            ranks[0] * ranks[3],          # 1×4
+            ranks[1] * ranks[5],          # 2×6
+        ]
+        f_list.extend(inter)
 
-        n = np.linalg.norm(
-            x,
-            axis=1,
-            keepdims=True
-        )
+        # 3. mild temporal smoothing on the engineered panel
+        #    (reduces turnover → protects net Sharpe)
+        eng = pd.concat(f_list, axis=1)
+        eng = eng.ewm(span=self.smooth_span, min_periods=self.min_periods).mean()
 
-        n = np.maximum(n, 1e-12)
+        # final cross-sectional de-mean of every column (harmless)
+        eng = eng.sub(eng.mean(axis=1), axis=0)
+        return eng.fillna(0.0)
 
-        return x / n * target
+    def _to_matrix(self, eng: pd.DataFrame, tickers) -> np.ndarray:
+        """
+        Convert engineered MultiIndex frame into a dense
+        (n_samples, n_features) matrix aligned to the 20 tickers.
+        """
+        # eng columns are still MultiIndex; we flatten for the linear model
+        # while preserving order
+        return eng.values
+
+    # ------------------------------------------------------------------
+    # required interface
+    # ------------------------------------------------------------------
+    def train(self, features: pd.DataFrame, target: pd.DataFrame):
+        """
+        features : MultiIndex columns (Feature.k, ticker)
+        target   : (T, 20) forward proprietary target (already xs-z & clipped)
+        """
+        # Engineer features (causal)
+        eng = self._engineer(features)
+
+        # Align target
+        y = target.reindex(eng.index).fillna(0.0)
+
+        # Flatten to (T, n_feat) and (T, 20)
+        X = eng.values
+        Y = y.values
+
+        # Simple per-asset ridge (fast & regularised)
+        # We train 20 independent models sharing the same feature matrix.
+        # This is cheap and avoids a single huge multi-output model.
+        self.models = []
+        self.scalers = []
+
+        for j in range(Y.shape[1]):
+            sc = StandardScaler()
+            Xj = sc.fit_transform(X)
+            m = Ridge(alpha=self.ridge_alpha, fit_intercept=False)
+            # only rows where target is not exactly zero (warm-up)
+            mask = np.abs(Y[:, j]) > 1e-8
+            if mask.sum() < 30:
+                # fallback: zero model
+                self.models.append(None)
+                self.scalers.append(sc)
+                continue
+            m.fit(Xj[mask], Y[mask, j])
+            self.models.append(m)
+            self.scalers.append(sc)
+
+        # remember column order for predict
+        self.feature_names_ = eng.columns
 
     def predict(self, features: pd.DataFrame) -> pd.DataFrame:
-
-        # ------------------------------------------------------------
-        # Basic validation
-        # ------------------------------------------------------------
-
-        if features is None or features.empty:
-            return pd.DataFrame(dtype=np.float32)
-
-        try:
-            tickers = features.columns.get_level_values(1).unique()
-        except Exception:
-            return pd.DataFrame(dtype=np.float32)
-
-        zero_signal = pd.DataFrame(
-            0.0,
-            index=features.index,
-            columns=tickers,
-            dtype=np.float32
-        )
-
-        if (
-            not self.feature_names
-            or len(self.feature_names) == 0
-        ):
-            return zero_signal
-
-        try:
-
-            # --------------------------------------------------------
-            # 1. Cross-sectional rank representation
-            # --------------------------------------------------------
-
-            ranked = {}
-
-            for name in self.feature_names:
-
-                block = features[name].astype(np.float64)
-
-                ranked[name] = self._rank(block).to_numpy(
-                    dtype=np.float64
-                )
-
-            n_time, n_assets = next(
-                iter(ranked.values())
-            ).shape
-
-            # --------------------------------------------------------
-            # 2. Build bounded nonlinear signals
-            # --------------------------------------------------------
-
-            signals = []
-
-            # Primary feature.
-            f0 = self.feature_names[0]
-            x0 = ranked[f0]
-
-            # tanh suppresses extreme cross-sectional ranks.
-            s0 = np.tanh(1.65 * x0)
-
-            signals.append(1.00 * s0)
-
-            # --------------------------------------------------------
-            # Secondary feature.
-            #
-            # Keep reversal component deliberately small.
-            # --------------------------------------------------------
-
-            if len(self.feature_names) >= 2:
-
-                f1 = self.feature_names[1]
-                x1 = ranked[f1]
-
-                s1 = -np.tanh(1.35 * x1)
-
-                signals.append(0.30 * s1)
-
-            # --------------------------------------------------------
-            # Additional features.
-            #
-            # Rather than multiplying many features together,
-            # use bounded interactions. This reduces tail explosions.
-            # --------------------------------------------------------
-
-            if len(self.feature_names) >= 3:
-
-                f2 = self.feature_names[2]
-                x2 = ranked[f2]
-
-                s2 = np.tanh(1.15 * x2)
-
-                signals.append(0.18 * s2)
-
-                # Stable interaction with primary signal.
-                signals.append(
-                    0.12
-                    * np.tanh(x0)
-                    * np.abs(np.tanh(x2))
-                )
-
-            if len(self.feature_names) >= 4:
-
-                f3 = self.feature_names[3]
-                x3 = ranked[f3]
-
-                s3 = np.tanh(1.10 * x3)
-
-                signals.append(0.12 * s3)
-
-                # Another weak interaction.
-                signals.append(
-                    0.10
-                    * np.tanh(x0)
-                    * np.tanh(x3)
-                )
-
-            # --------------------------------------------------------
-            # 3. Weighted ensemble
-            # --------------------------------------------------------
-
-            raw = np.zeros(
-                (n_time, n_assets),
-                dtype=np.float64
-            )
-
-            weight_sum = 0.0
-
-            weights = [
-                1.00,
-                0.30,
-                0.18,
-                0.12,
-                0.12,
-                0.10
-            ]
-
-            for i, block in enumerate(signals):
-
-                w = weights[i] if i < len(weights) else 0.05
-
-                raw += w * block
-                weight_sum += w
-
-            raw /= max(weight_sum, 1e-12)
-
-            # --------------------------------------------------------
-            # 4. Cross-sectional demeaning
-            # --------------------------------------------------------
-
-            raw = self._demean(raw)
-
-            # --------------------------------------------------------
-            # 5. Robust row-wise scale normalization
-            #
-            # Prevent a handful of rows from dominating.
-            # --------------------------------------------------------
-
-            med = np.median(
-                np.abs(raw),
-                axis=1,
-                keepdims=True
-            )
-
-            med = np.maximum(med, 1e-6)
-
-            raw = raw / med
-
-            # Bounded final signal.
-            raw = np.tanh(raw * 0.35)
-
-            raw = self._demean(raw)
-
-            # --------------------------------------------------------
-            # 6. Normalize to controlled L2 concentration
-            # --------------------------------------------------------
-
-            target_signal = self._normalize_l2(
-                raw,
-                self.target_l2
-            )
-
-            # --------------------------------------------------------
-            # 7. Continuous causal EMA
-            #
-            # No discontinuous "freeze / jump" threshold.
-            # --------------------------------------------------------
-
-            final_positions = np.zeros_like(
-                target_signal
-            )
-
-            if (
-                self.prev_signal is not None
-                and self.prev_tickers is not None
-                and self.prev_signal.shape == (n_assets,)
-                and self.prev_tickers.equals(tickers)
-            ):
-                previous = self.prev_signal.copy()
-            else:
-                previous = np.zeros(
-                    n_assets,
-                    dtype=np.float64
-                )
-
-            for t in range(n_time):
-
-                desired = target_signal[t]
-
-                # Continuous response.
-                current = (
-                    (1.0 - self.ema_alpha) * previous
-                    + self.ema_alpha * desired
-                )
-
-                # Maintain market neutrality.
-                current -= current.mean()
-
-                # Tiny deadband only to prevent numerical churn.
-                delta = current - previous
-
-                small = np.abs(delta) < self.min_change
-
-                current[small] = previous[small]
-
-                current -= current.mean()
-
-                final_positions[t] = current
-
-                previous = current.copy()
-
-            # --------------------------------------------------------
-            # 8. Final compliance
-            # --------------------------------------------------------
-
-            final_df = pd.DataFrame(
-                final_positions,
-                index=features.index,
-                columns=tickers
-            )
-
-            # Neutrality.
-            final_df = final_df.sub(
-                final_df.mean(axis=1),
-                axis=0
-            )
-
-            # Position bound.
-            final_df = final_df.clip(
-                -self.target_bound,
-                self.target_bound
-            )
-
-            # Re-neutralize after clipping.
-            final_df = final_df.sub(
-                final_df.mean(axis=1),
-                axis=0
-            )
-
-            # --------------------------------------------------------
-            # 9. Persist only the final causal state.
-            # --------------------------------------------------------
-
-            self.prev_signal = (
-                final_df.iloc[-1]
-                .to_numpy(dtype=np.float64)
-            )
-
-            self.prev_tickers = final_df.columns.copy()
-
-            return final_df.astype(np.float32)
-
-        except Exception:
-            return zero_signal
+        """
+        Return a cross-sectionally de-meaned signal of shape (T, 20).
+        Must be causal and fast.
+        """
+        eng = self._engineer(features)
+        X = eng.values
+
+        preds = np.zeros((X.shape[0], 20))
+        for j, (m, sc) in enumerate(zip(self.models, self.scalers)):
+            if m is None:
+                continue
+            Xj = sc.transform(X)
+            preds[:, j] = m.predict(Xj)
+
+        # build DataFrame with correct ticker columns
+        tickers = features.columns.get_level_values(1).unique()
+        pred_df = pd.DataFrame(preds, index=features.index, columns=tickers)
+
+        # final cross-sectional de-mean (mandatory)
+        pred_df = pred_df.sub(pred_df.mean(axis=1), axis=0)
+
+        # optional mild L1 normalisation to keep position sizes stable
+        # (helps concentration & turnover)
+        abs_sum = pred_df.abs().sum(axis=1).replace(0, np.nan)
+        pred_df = pred_df.div(abs_sum, axis=0).fillna(0.0)
+
+        return pred_df
+
+# mandatory instantiation for the runner
+predictor = MyPredictor()
