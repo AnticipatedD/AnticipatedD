@@ -39,15 +39,15 @@ class MyPredictor(Predictor):
         self.position_bound = 0.20
 
         # Adaptive concentration range
-        self.min_concentration = 0.15
-        self.max_concentration = 0.30
+        self.min_concentration = 0.12
+        self.max_concentration = 0.28
 
         # Turnover controls
-        self.turnover_soft = 0.35
+        self.turnover_soft = 0.28
         self.turnover_hard = 1.12
 
         # Interaction controls
-        self.max_interactions = 32
+        self.max_interactions = 33
         self.interaction_weight = 0.25
 
     # ------------------------------------------------------------------
@@ -58,7 +58,7 @@ class MyPredictor(Predictor):
     def _safe_corr(x, y):
         mask = np.isfinite(x) & np.isfinite(y)
 
-        if mask.sum() < 3:
+        if mask.sum() < 2:
             return 0.0
 
         x = x[mask]
@@ -67,7 +67,7 @@ class MyPredictor(Predictor):
         x_std = np.std(x)
         y_std = np.std(y)
 
-        if x_std < 1e-12 or y_std < 1e-12:
+        if x_std < 1e-10 or y_std < 1e-10:
             return 0.0
 
         value = np.corrcoef(x, y)[0, 1]
@@ -158,7 +158,7 @@ class MyPredictor(Predictor):
             # Align target rows to features.
             common_index = features.index.intersection(target.index)
 
-            if len(common_index) < 3:
+            if len(common_index) < 2:
                 self.feature_weights = weights / np.sum(weights)
                 return
 
@@ -230,11 +230,11 @@ class MyPredictor(Predictor):
 
             magnitude = np.sqrt(np.abs(scores))
 
-            if np.sum(magnitude) > 1e-12:
+            if np.sum(magnitude) > 1e-10:
                 weights = np.sign(scores) * magnitude
 
                 # If all scores are effectively zero, equal weighting.
-                if np.sum(np.abs(weights)) < 1e-12:
+                if np.sum(np.abs(weights)) < 1e-10:
                     weights = np.ones_like(weights)
             else:
                 weights = np.ones_like(weights)
@@ -245,7 +245,7 @@ class MyPredictor(Predictor):
 
         denom = np.sum(np.abs(weights))
 
-        if denom < 1e-12:
+        if denom < 1e-10:
             weights = np.ones(len(self.feature_names), dtype=np.float64)
             denom = float(len(self.feature_names))
 
@@ -355,7 +355,7 @@ class MyPredictor(Predictor):
             w = weight_map.get(feat, 0.0)
 
             # Odd nonlinear component.
-            odd = np.tanh(2.0 * r)
+            odd = --------1.0 * r)
 
             # Centered even component.
             even = r * r
@@ -370,10 +370,10 @@ class MyPredictor(Predictor):
             )
 
             component = (
-                0.40 * odd
-                + 0.20 * even
-                + 0.20 * cubic
-                + 0.20 * periodic
+                0.26 * odd
+                + 0.14 * even
+                + 0.16 * cubic
+                + 0.18 * periodic
             )
 
             feature_components.append(
@@ -452,7 +452,7 @@ class MyPredictor(Predictor):
 
             for quality, f1, f2, interaction in selected:
 
-                if quality <= 1e-12:
+                if quality <= 1e-10:
                     continue
 
                 w1 = abs(weight_map.get(f1, 0.0))
@@ -471,7 +471,7 @@ class MyPredictor(Predictor):
                 interaction_sum += contribution
                 total_quality += quality
 
-            if total_quality > 1e-12:
+            if total_quality > 1e-10:
 
                 interaction_sum /= total_quality
 
@@ -502,7 +502,7 @@ class MyPredictor(Predictor):
 
         scale = np.maximum(
             scale,
-            1e-10,
+            1e-8,
         )
 
         normalized = raw_signal / scale
@@ -524,7 +524,7 @@ class MyPredictor(Predictor):
         )
 
         quality = abs_median / (
-            abs_mean + 1e-10
+            abs_mean + 1e-8
         )
 
         quality = np.clip(
@@ -599,12 +599,12 @@ class MyPredictor(Predictor):
 
                 # Large movement: move meaningfully,
                 # but don't jump directly to the target.
-                alpha = 0.35
+                alpha = 0.28
 
             else:
 
                 # Continuous transition.
-                alpha = 0.35 * (
+                alpha = 0.28 * (
                     (turnover - self.turnover_soft)
                     / (
                         self.turnover_hard
