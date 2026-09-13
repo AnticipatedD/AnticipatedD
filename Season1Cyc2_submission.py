@@ -7,27 +7,17 @@
 
 import numpy as np
 import pandas as pd
-from sklearn.preprocessing import RobustScaler
-from sklearn.linear_model import Ridge
-from scipy import stats
-import warnings
-
-warnings.filterwarnings("ignore", category=FutureWarning)
-warnings.filterwarnings("ignore", category=DeprecationWarning)
 
 from predictor import Predictor
-
 
 class MyPredictor(Predictor):
     """
     AlphaNova Elite Production Signal: Adaptive Cross-Sectional Momentum
-    
     This class implements a high-performance trading signal that combines:
     1. Nonlinear feature interactions (targets competition's hard target)
     2. Ridge regression with L2 regularization (overfitting defense)
     3. EMA smoothing (turnover optimization, +6% Sharpe)
     4. Dual cross-sectional de-meaning (mandatory enforcement)
-    
     Inheritance: Inherits from predictor.Predictor base class
     Interface: train(features, target) → predict(features)
     Output: Cross-sectionally de-meaned signal (∑ⱼ P(t) = 0)
@@ -40,7 +30,7 @@ class MyPredictor(Predictor):
         self.n_features = None
         
         # Feature scaling (IQR-based, robust to outliers)
-        self.feature_scaler = RobustScaler(quantile_range=(5.0, 85.0))
+        self.feature_scaler = RobustScaler(quantile_range=(1.0, 5.0))
         
         # Ridge regression state
         self.coefficients = None
@@ -143,11 +133,11 @@ class MyPredictor(Predictor):
         
         # (2) Interactions: products & ratios
         for f1 in range(F):
-            for f2 in range(f1 + 1, min(f1 + 3, F)):
+            for f2 in range(f1 + 1, min(f1 + 2, F)):
                 feat1, feat2 = X_raw[:, :, f1], X_raw[:, :, f2]
                 engineered.append(feat1 * feat2)
                 with np.errstate(divide='ignore', invalid='ignore'):
-                    engineered.append(np.where(np.abs(feat2) > 1e-9, feat1 / (np.abs(feat2) + 1e-9), feat1))
+                    engineered.append(np.where(np.abs(feat2) > 1e-10, feat1 / (np.abs(feat2) + 1e-10), feat1))
         
         # (3) Temporal: volatility + momentum
         for f in range(F):
@@ -160,14 +150,14 @@ class MyPredictor(Predictor):
         
         X_eng = np.stack(engineered, axis=2)
         X_flat = X_eng.reshape(T, -1)
-        return np.nan_to_num(X_flat, nan=0.0, posinf=1e3, neginf=-1e3)
+        return np.nan_to_num(X_flat, nan=0.0, posinf=1e6, neginf=-1e6)
     
     def _fit_ridge_regression(self, X_norm, y_raw):
         """Fit ridge regression with adaptive L2 penalty."""
         T, D = X_norm.shape
         
         self.target_mean = np.mean(y_raw)
-        self.target_std = np.std(y_raw) + 1e-9
+        self.target_std = np.std(y_raw) + 1e-10
         y_std = (y_raw - self.target_mean) / self.target_std
         
         lambda_ridge = 35.0 / np.sqrt(D)
@@ -202,7 +192,7 @@ class MyPredictor(Predictor):
             # [CRITICAL] Cross-sectional de-meaning (FIRST PASS)
             signal_demeaned = signal_raw - signal_raw.mean(axis=1, keepdims=True)
             residual_mean = np.abs(signal_demeaned.mean(axis=1)).max()
-            if residual_mean > 1e-9:
+            if residual_mean > 1e-10:
                 signal_demeaned -= signal_demeaned.mean(axis=1, keepdims=True)
             
             # Turnover control: EMA smoothing
@@ -231,7 +221,7 @@ class MyPredictor(Predictor):
         # Re-normalize to preserve signal magnitude
         for t in range(T):
             std_t = np.std(signal_smooth[t])
-            if std_t > 1e-9:
+            if std_t > 1e-10:
                 signal_smooth[t] *= np.std(signal_raw[t]) / std_t
         
         return signal_smooth
