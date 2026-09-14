@@ -4,7 +4,6 @@
 # "pandas",
 # ]
 # ///
-
 import numpy as np
 import pandas as pd
 from predictor import Predictor
@@ -16,12 +15,13 @@ class MyPredictor(Predictor):
         self.prev_signal = None
         self.prev_tickers = None
         self.target_bound = 0.20
-        self.optimal_concentration = 0.45  # Increased for better coverage
-        self.l1_hysteresis_threshold = 1.12
+        self.optimal_concentration = 0.35  # Moderate concentration
         
-        # AlphaNova Competition Tuning Upgrades
-        self.decay_factor = 0.90            # Multi-scale decay memory parameter
-        self.rolling_var = None             # Rolling variance cache for cross-sectional scaling
+        # FIXED: Lowered threshold allows allocations to update rather than trapping them at 0
+        self.l1_hysteresis_threshold = 0.25 
+        
+        # COMPETITION OVERRIDE: Set to True if validation continues to show a persistently negative IC
+        self.sign_flip = False 
 
     def train(self, features: pd.DataFrame, target: pd.DataFrame) -> None:
         if features is not None:
@@ -35,7 +35,7 @@ class MyPredictor(Predictor):
             return zero_signal
             
         try:
-            # 1. Cross-Sectional Rank Transform
+            # 1. Rank Transform
             ranks = {}
             for feat in self.feature_names:
                 r = (features[feat].rank(axis=1, pct=True, method='max') - 0.5) * 2.0
@@ -43,43 +43,33 @@ class MyPredictor(Predictor):
 
             N_time, J_assets = list(ranks.values())[0].shape
             
-            # 2. ROBUST MULTI-SCALE NON-LINEAR PROJECTIONS
+            # 2. Corrected Block Interaction Generation
             interaction_blocks = []
             for i in range(len(self.feature_names)):
                 f1 = self.feature_names[i]
-                # Saturated linear feature component
                 interaction_blocks.append(np.tanh(ranks[f1] * 3.0))
                 
                 for j in range(i + 1, len(self.feature_names)):
                     f2 = self.feature_names[j]
-                    # Asymmetric cross-coupling regime interaction
-                    interaction_blocks.append(ranks[f1] * np.sign(ranks[f2]) * (np.abs(ranks[f2]) ** 1.5))
-                    # Pure cross-sectional sign interaction block
-                    interaction_blocks.append(np.sign(ranks[f1]) * np.sign(ranks[f2]))
+                    interaction_blocks.append(ranks[f1] * np.sign(ranks[f2]) * (np.abs(ranks[f2]) ** 0.5))
 
-            raw_elements = np.array(interaction_blocks)
+            # Stack along a clean front axis to avoid structural compression anomalies
+            raw_elements = np.stack(interaction_blocks, axis=0) 
             magnitudes = np.abs(raw_elements)
             row_weights = magnitudes ** 2 
             
-            # Weighted average consensus velocity
-            raw_velocity = np.sum(raw_elements * row_weights, axis=0) / (np.sum(row_weights, axis=0) + 1e-8)
+            # Cross-sectional element-wise weighted consensus
+            raw_velocity = np.sum(raw_elements * row_weights, axis=0) / (np.sum(row_weights, axis=0) + 1e-10)
             raw_velocity = np.nan_to_num(raw_velocity)
 
-            # 3. DYNAMIC VOLATILITY SCALING & CROSS-SECTIONAL DEMEANING
-            # Compute exponential moving volatility across time to scale velocity inputs
-            velocity_df = pd.DataFrame(raw_velocity, index=features.index, columns=tickers)
-            cross_sectional_std = velocity_df.std(axis=1).replace(0, 1.0).to_numpy()[:, np.newaxis]
+            # 3. Geometric Subspace Demean & Hypersphere S^{J-2} Projection
+            velocity_demeaned = raw_velocity - raw_velocity.mean(axis=1, keepdims=True)
             
-            # Standardize velocities cross-sectionally to expose orthogonal signals
-            velocity_standardized = raw_velocity / cross_sectional_std
-            velocity_demeaned = velocity_standardized - velocity_standardized.mean(axis=1, keepdims=True)
-            
-            # Spherical normalization to target space S^{J-2}
             norms = np.linalg.norm(velocity_demeaned, axis=1, keepdims=True)
-            norms[norms < 1e-8] = 1.0
+            norms[norms < 1e-10] = 1.0
             sphere_target = (velocity_demeaned / norms) * self.optimal_concentration 
 
-            # 4. TUNED EXECUTION FILTER: ADAPTIVE L1 CAUSAL HYSTERESIS LOOP
+            # 4. Execution Filter: L1 Causal Hysteresis Loop
             final_positions = np.zeros_like(sphere_target)
             
             if (
@@ -96,29 +86,28 @@ class MyPredictor(Predictor):
                 target_position = sphere_target[t]
                 l1_allocation_delta = np.sum(np.abs(target_position - active_position))
                 
-                # Dynamically relax the hysteresis loop if target velocities are high
-                signal_momentum = np.max(np.abs(target_position))
-                adaptive_threshold = self.l1_hysteresis_threshold * (1.0 - min(0.3, signal_momentum))
-                
-                if l1_allocation_delta < adaptive_threshold:
+                if l1_allocation_delta < self.l1_hysteresis_threshold:
                     current_allocation = active_position.copy()
                 else:
-                    # Dynamic allocation weight blending logic 
-                    current_allocation = 0.25 * target_position + 0.75 * active_position
+                    current_allocation = 0.20 * target_position + 0.80 * active_position
                     current_allocation -= current_allocation.mean()
                 
                 final_positions[t] = current_allocation
                 active_position = current_allocation.copy()
 
-            # 5. COMPLIANCE FORMATTING & FINAL RE-CENTERING
+            # 5. Compliance Formatting & Final Re-Centering
             final_df = pd.DataFrame(final_positions, index=features.index, columns=tickers)
             
-            # Enforce hard zero cross-sectional sum and exposure boundary limits
+            # Apply absolute neutralization boundaries
             final_df = final_df.sub(final_df.mean(axis=1), axis=0)
             final_df = final_df.clip(-self.target_bound, self.target_bound)
             final_df = final_df.sub(final_df.mean(axis=1), axis=0)
             
-            # Store final state snapshot for downstream evaluation blocks
+            # Optional alpha direction fix
+            if self.sign_flip:
+                final_df = -final_df
+            
+            # Update snapshot memory
             self.prev_signal = final_df.iloc[-1].to_numpy(dtype=np.float64)
             self.prev_tickers = final_df.columns.copy()
             
