@@ -15,9 +15,9 @@ class MyPredictor(Predictor):
         self.prev_signal = None
         self.prev_tickers = None
 
-        self.target_bound = 0.20
-        self.l1_threshold = 1.15          # much looser
-        self.ema_alpha = 0.28             # faster reaction
+        self.target_bound = 0.28
+        self.l1_threshold = 1.12          # much looser
+        self.ema_alpha = 0.14             # faster reaction
 
     def train(self, features: pd.DataFrame, target) -> None:
         if features is not None and len(features) > 0:
@@ -45,20 +45,20 @@ class MyPredictor(Predictor):
             signal = np.zeros((T, J))
             for f in range(F):
                 x = ranks[:, :, f]
-                signal += np.tanh(x * 2.7)
-                signal += np.sign(x) * (np.abs(x) ** 1.3)
+                signal += np.tanh(x * 2.8)
+                signal += np.sign(x) * (np.abs(x) ** 1.2)
 
             # pairwise
             for i in range(F):
                 for j in range(i+1, F):
-                    signal += ranks[:, :, i] * ranks[:, :, j] * 0.5
+                    signal += ranks[:, :, i] * ranks[:, :, j] * 0.7
 
             # 3. Only demean (NO spherical projection – this was killing concentration)
             signal = signal - signal.mean(axis=1, keepdims=True)
 
             # scale to reasonable magnitude
             stds = np.std(signal, axis=1, keepdims=True)
-            stds = np.maximum(stds, 1e-10)
+            stds = np.maximum(stds, 1e-12)
             signal = signal / stds * 0.28
 
             # 4. Mild turnover control only
@@ -90,7 +90,7 @@ class MyPredictor(Predictor):
 
             self.prev_signal = df.iloc[-1].to_numpy()
             self.prev_tickers = df.columns.copy()
-            return df.astype(np.float64)
+            return df.astype(np.float32)
 
         except Exception:
             return zero
