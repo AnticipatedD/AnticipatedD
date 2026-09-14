@@ -15,11 +15,9 @@ class MyPredictor(Predictor):
         self.prev_signal = None
         self.prev_tickers = None
 
-        # restored stronger concentration + milder hysteresis
-        self.target_bound = 0.30
-        self.optimal_concentration = 0.32
-        self.l1_hysteresis_threshold = 1.05
-        self.ema_alpha = 0.22
+        self.target_bound = 0.20
+        self.l1_threshold = 1.15          # much looser
+        self.ema_alpha = 0.28             # faster reaction
 
     def train(self, features: pd.DataFrame, target) -> None:
         if features is not None and len(features) > 0:
@@ -33,65 +31,66 @@ class MyPredictor(Predictor):
             return zero
 
         try:
-            # 1. ranks
-            ranks = {}
+            # 1. Simple cross-sectional ranks
+            ranks = []
             for feat in self.feature_names:
                 block = features[feat].astype(np.float64)
-                r = (block.rank(axis=1, pct=True, method="max") - 0.5) * 2.0
-                ranks[feat] = r.fillna(0.0).to_numpy()
+                r = (block.rank(axis=1, pct=True, method="average") - 0.5) * 2.0
+                ranks.append(r.fillna(0.0).to_numpy())
+            ranks = np.stack(ranks, axis=-1)          # (T, J, F)
 
-            N, J = list(ranks.values())[0].shape
+            T, J, F = ranks.shape
 
-            # 2. stronger & slightly different non-linear expansion
-            #    (changes the geometric fingerprint → higher city/global angle)
-            blocks = []
-            for i, f1 in enumerate(self.feature_names):
-                x = ranks[f1]
-                blocks.append(np.tanh(x * 2.4))
-                blocks.append(np.sign(x) * np.sqrt(np.abs(x)))          # new term
-                for j in range(i + 1, len(self.feature_names)):
-                    y = ranks[self.feature_names[j]]
-                    blocks.append(np.sin(x * np.pi * 0.31) * np.cos(y * np.pi * 0.19))
-                    blocks.append(x * y * (1.0 - np.abs(x)))             # new interaction
+            # 2. Stronger non-linear combination (different from previous)
+            signal = np.zeros((T, J))
+            for f in range(F):
+                x = ranks[:, :, f]
+                signal += np.tanh(x * 2.7)
+                signal += np.sign(x) * (np.abs(x) ** 1.3)
 
-            raw = np.mean(blocks, axis=0)
+            # pairwise
+            for i in range(F):
+                for j in range(i+1, F):
+                    signal += ranks[:, :, i] * ranks[:, :, j] * 0.5
 
-            # 3. demean + spherical projection (stronger concentration)
-            raw = raw - raw.mean(axis=1, keepdims=True)
-            norms = np.linalg.norm(raw, axis=1, keepdims=True)
-            norms = np.maximum(norms, 1e-10)
-            sphere = (raw / norms) * self.optimal_concentration
+            # 3. Only demean (NO spherical projection – this was killing concentration)
+            signal = signal - signal.mean(axis=1, keepdims=True)
 
-            # 4. milder L1 hysteresis + EMA
-            final = np.zeros_like(sphere)
-            if (self.prev_signal is not None
-                and self.prev_tickers is not None
-                and self.prev_signal.shape == (J,)
-                and list(self.prev_tickers) == list(tickers)):
+            # scale to reasonable magnitude
+            stds = np.std(signal, axis=1, keepdims=True)
+            stds = np.maximum(stds, 1e-10)
+            signal = signal / stds * 0.28
+
+            # 4. Mild turnover control only
+            final = np.zeros_like(signal)
+            if (self.prev_signal is not None and
+                self.prev_tickers is not None and
+                self.prev_signal.shape == (J,) and
+                list(self.prev_tickers) == list(tickers)):
                 active = self.prev_signal.copy()
             else:
-                active = np.zeros(J, dtype=np.float64)
+                active = np.zeros(J)
 
-            for t in range(N):
-                target = sphere[t]
+            for t in range(T):
+                target = signal[t]
                 l1 = np.sum(np.abs(target - active))
-                if l1 < self.l1_hysteresis_threshold:
-                    current = active.copy()
+                if l1 < self.l1_threshold:
+                    current = active
                 else:
                     current = self.ema_alpha * target + (1.0 - self.ema_alpha) * active
                     current -= current.mean()
                 final[t] = current
                 active = current.copy()
 
-            # 5. final compliance
+            # 5. Final safety
             df = pd.DataFrame(final, index=features.index, columns=tickers)
             df = df.sub(df.mean(axis=1), axis=0)
             df = df.clip(-self.target_bound, self.target_bound)
             df = df.sub(df.mean(axis=1), axis=0)
 
-            self.prev_signal = df.iloc[-1].to_numpy(dtype=np.float64)
+            self.prev_signal = df.iloc[-1].to_numpy()
             self.prev_tickers = df.columns.copy()
-            return df.astype(np.float32)
+            return df.astype(np.float64)
 
         except Exception:
             return zero
