@@ -7,191 +7,177 @@
 # ]
 # ///
 
+import warnings
 import numpy as np
 import pandas as pd
 from sklearn.preprocessing import RobustScaler
 from sklearn.linear_model import Ridge
 from scipy import stats
-import warnings
 
 warnings.filterwarnings("ignore")
 
-from predictor import Predictor   # provided by the competition
+# The portal provides this base class. Keep the import.
+from predictor import Predictor
 
 
 class MyPredictor(Predictor):
     """
-    Cross-sectional momentum + nonlinear interactions + EMA turnover control.
-    Target: positive Sharpe (0.15–0.25 range under realistic costs).
+    Cross-sectional momentum + interactions + EMA smoothing.
+    Designed for positive Sharpe after 5 bp costs.
     """
 
     def __init__(self):
         self.is_trained = False
         self.n_assets = None
-        self.n_features = None
-
-        self.feature_scaler = RobustScaler(quantile_range=(5.0, 95.0))
+        self.feature_scaler = None
         self.coefficients = None
         self.intercept = 0.0
         self.target_mean = 0.0
         self.target_std = 1.0
+        self.alpha_smooth = 0.15   # lower = less turnover (try 0.10–0.20)
 
-        # EMA smoothing – critical for positive Sharpe after 5 bp costs
-        self.alpha_smooth = 0.15
-
+    # ------------------------------------------------------------------
+    # Required interface
+    # ------------------------------------------------------------------
     def train(self, features, target):
-        """Train in < 240 s."""
-        self._validate_input(features, target)
         X_raw, y_raw = self._extract_tensors(features, target)
-
         X_eng = self._engineer_features(X_raw)
-        X_norm = self.feature_scaler.fit_transform(X_eng)
-        X_norm = np.clip(X_norm, -10.0, 10.0)
-
+        X_norm = self._normalize(X_eng, fit=True)
         self._fit_ridge(X_norm, y_raw)
         self.is_trained = True
 
     def predict(self, features):
-        """Produce de-meaned signal in < 60 s."""
         if not self.is_trained:
-            raise RuntimeError("Model must be trained before predict()")
+            raise RuntimeError("Call train() before predict()")
 
-        X_raw, _ = self._extract_tensors(features, np.zeros(len(features)))
+        X_raw, _ = self._extract_tensors(features, None)
         X_eng = self._engineer_features(X_raw)
-        X_norm = self.feature_scaler.transform(X_eng)
-        X_norm = np.clip(X_norm, -10.0, 10.0)
+        X_norm = self._normalize(X_eng, fit=False)
 
-        # Linear prediction
-        pred_std = X_norm @ self.coefficients + self.intercept
-        pred = pred_std * self.target_std + self.target_mean
+        pred = X_norm @ self.coefficients + self.intercept
+        pred = pred * self.target_std + self.target_mean
 
         T, J = X_raw.shape[0], X_raw.shape[1]
         signal = pred.reshape(T, J)
 
-        # First mandatory de-meaning
+        # First mandatory de-mean
         signal = signal - signal.mean(axis=1, keepdims=True)
 
-        # Turnover control (EMA) – the main source of positive Sharpe
-        signal = self._apply_ema_smoothing(signal)
+        # Turnover control (critical for positive net Sharpe)
+        signal = self._ema_smooth(signal)
 
-        # Second mandatory de-meaning + numerical guards
+        # Final clean-up + second de-mean
         signal = np.nan_to_num(signal, nan=0.0, posinf=0.0, neginf=0.0)
         signal = np.clip(signal, -100.0, 100.0)
         signal = signal - signal.mean(axis=1, keepdims=True)
 
-        return signal
+        return signal.astype(np.float64)
 
     # ------------------------------------------------------------------
-    # Internal helpers
+    # Helpers
     # ------------------------------------------------------------------
-
-    def _validate_input(self, features, target):
-        if features is None or target is None:
-            raise ValueError("features / target cannot be None")
-        if len(features) != len(target):
-            raise ValueError("Length mismatch between features and target")
-        if len(features) < 50:
-            raise ValueError("Need at least 50 samples")
-        if np.isnan(np.asarray(target)).any():
-            raise ValueError("target contains NaN")
-
     def _extract_tensors(self, features, target):
-        """Return X_raw of shape (T, J, F) and y of shape (T,)."""
+        """Return X of shape (T, J, 6) and y of shape (T,)."""
         if isinstance(features, pd.DataFrame):
             if isinstance(features.columns, pd.MultiIndex):
+                # Official format: level 0 = feature name, level 1 = ticker
                 feat_names = sorted(features.columns.get_level_values(0).unique())
                 X_list = [features[f].values for f in feat_names]
-                X_raw = np.stack(X_list, axis=-1)          # (T, J, F)
+                X = np.stack(X_list, axis=-1)          # (T, J, F)
             else:
-                X_flat = features.values
-                if X_flat.shape[1] % 6 != 0:
-                    raise ValueError("Number of columns not divisible by 6")
-                J = X_flat.shape[1] // 6
-                X_raw = X_flat.reshape(-1, J, 6)
+                vals = features.values
+                if vals.shape[1] % 6 != 0:
+                    raise ValueError(f"Columns {vals.shape[1]} not divisible by 6")
+                J = vals.shape[1] // 6
+                X = vals.reshape(-1, J, 6)
         else:
-            X_raw = np.asarray(features)
+            X = np.asarray(features, dtype=np.float64)
+            if X.ndim == 2:
+                if X.shape[1] % 6 != 0:
+                    raise ValueError(f"Columns {X.shape[1]} not divisible by 6")
+                J = X.shape[1] // 6
+                X = X.reshape(-1, J, 6)
+            elif X.ndim != 3 or X.shape[2] != 6:
+                raise ValueError(f"Expected (T, J, 6), got {X.shape}")
 
-        y = np.asarray(target).ravel()
-        self.n_assets = X_raw.shape[1]
-        self.n_features = X_raw.shape[2]
-        return X_raw, y
+        self.n_assets = X.shape[1]
 
-    def _engineer_features(self, X_raw):
-        """
-        ~50-60 engineered features:
-        - level, cross-sectional deviation, rank
-        - pairwise products & ratios
-        - short-term volatility & momentum
-        """
-        T, J, F = X_raw.shape
+        if target is None:
+            y = np.zeros(X.shape[0], dtype=np.float64)
+        else:
+            y = np.asarray(target).ravel().astype(np.float64)
+            if len(y) != X.shape[0]:
+                raise ValueError("features and target length mismatch")
+
+        return X.astype(np.float64), y
+
+    def _engineer_features(self, X):
+        """Fast, robust cross-sectional features → (T, J * n_eng)."""
+        T, J, F = X.shape
         feats = []
 
-        # ---- Layer 1: base transforms (3 × F) ----
         for f in range(F):
-            x = X_raw[:, :, f]
-            feats.append(x)                                      # level
-            feats.append(x - x.mean(axis=1, keepdims=True))      # deviation
-            ranks = np.array([stats.rankdata(x[t]) for t in range(T)])
-            feats.append(ranks / J - 0.5)                        # centered rank
+            x = X[:, :, f]                              # (T, J)
 
-        # ---- Layer 2: pairwise interactions (limited to keep D reasonable) ----
-        for f1 in range(F):
-            for f2 in range(f1 + 1, min(f1 + 3, F)):
-                a, b = X_raw[:, :, f1], X_raw[:, :, f2]
-                feats.append(a * b)
-                with np.errstate(divide="ignore", invalid="ignore"):
-                    ratio = np.where(np.abs(b) > 1e-8, a / (np.abs(b) + 1e-8), a)
-                feats.append(ratio)
+            # level
+            feats.append(x)
 
-        # ---- Layer 3: temporal features ----
-        for f in range(F):
-            x = X_raw[:, :, f]
-            # 3-period rolling std
-            vol = np.zeros_like(x)
-            for t in range(2, T):
-                vol[t] = np.std(x[t-2:t+1], axis=0)
-            feats.append(vol)
+            # cross-sectional deviation
+            feats.append(x - x.mean(axis=1, keepdims=True))
+
+            # centered rank (vectorised)
+            ranks = np.apply_along_axis(
+                lambda row: stats.rankdata(row) / J - 0.5, 1, x
+            )
+            feats.append(ranks)
+
             # 1-period momentum
-            mom = np.diff(x, axis=0, prepend=0)
+            mom = np.diff(x, axis=0, prepend=x[:1])
             feats.append(mom)
 
-        X_eng = np.stack(feats, axis=2)               # (T, J, D_eng)
-        X_flat = X_eng.reshape(T, -1)                 # (T, J*D_eng)
-        return np.nan_to_num(X_flat, nan=0.0, posinf=1e3, neginf=-1e3)
+        # a few cheap pairwise products (keeps dimensionality modest)
+        for i in range(min(3, F)):
+            for j in range(i + 1, min(i + 2, F)):
+                feats.append(X[:, :, i] * X[:, :, j])
 
-    def _fit_ridge(self, X_norm, y_raw):
-        """Ridge with adaptive L2 strength."""
-        self.target_mean = float(np.mean(y_raw))
-        self.target_std = float(np.std(y_raw) + 1e-8)
-        y_std = (y_raw - self.target_mean) / self.target_std
+        X_eng = np.stack(feats, axis=-1)                # (T, J, n_eng)
+        X_flat = X_eng.reshape(T, -1)
+        return np.nan_to_num(X_flat, nan=0.0, posinf=0.0, neginf=0.0)
 
-        D = X_norm.shape[1]
-        alpha = 10.0 / np.sqrt(D)          # adaptive regularisation
+    def _normalize(self, X, fit=False):
+        if fit or self.feature_scaler is None:
+            self.feature_scaler = RobustScaler(quantile_range=(5.0, 95.0))
+            Xn = self.feature_scaler.fit_transform(X)
+        else:
+            Xn = self.feature_scaler.transform(X)
+        return np.clip(Xn, -8.0, 8.0)
 
+    def _fit_ridge(self, X, y):
+        self.target_mean = float(np.mean(y))
+        self.target_std = float(np.std(y) + 1e-8)
+        y_std = (y - self.target_mean) / self.target_std
+
+        # adaptive L2 – helps pass the overfitting gate
+        alpha = max(1.0, 8.0 / np.sqrt(X.shape[1]))
         model = Ridge(alpha=alpha, fit_intercept=True, max_iter=10000)
-        model.fit(X_norm, y_std)
+        model.fit(X, y_std)
 
-        self.coefficients = model.coef_
-        self.intercept = model.intercept_
+        self.coefficients = model.coef_.ravel()
+        self.intercept = float(model.intercept_)
 
-    def _apply_ema_smoothing(self, signal):
-        """
-        Exponential smoothing that dramatically reduces turnover.
-        This step is usually the difference between Sharpe ≈ 0 and Sharpe > 0.15.
-        """
+    def _ema_smooth(self, signal):
+        """EMA across time – the main source of positive net Sharpe."""
         T, J = signal.shape
-        smooth = np.zeros_like(signal)
-        smooth[0] = signal[0]
-
+        out = np.empty_like(signal)
+        out[0] = signal[0]
         a = self.alpha_smooth
         for t in range(1, T):
-            smooth[t] = a * signal[t] + (1.0 - a) * smooth[t - 1]
+            out[t] = a * signal[t] + (1.0 - a) * out[t - 1]
 
-        # Optional: re-scale each cross-section to keep volatility similar
+        # keep roughly the same cross-sectional volatility
         for t in range(T):
             s_raw = np.std(signal[t])
-            s_sm = np.std(smooth[t])
-            if s_sm > 1e-8 and s_raw > 1e-8:
-                smooth[t] *= s_raw / s_sm
-
-        return smooth
+            s_out = np.std(out[t])
+            if s_out > 1e-8 and s_raw > 1e-8:
+                out[t] *= s_raw / s_out
+        return out
