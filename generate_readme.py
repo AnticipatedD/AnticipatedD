@@ -34,11 +34,11 @@ def generate_production_profile():
 
 ## 🌐 Digital Workspace & Project Infrastructures
 * 🖥️ **Personal Live Portfolio:** Explore raw asset frameworks at [anticipatedd.github.io/mdhossain](https://github.io)
-* 🚀 **Featured Project Deployment:** Review active operational structures at the [VANE-SPACE-SLA Platform Gateway](https://github.io)
-* 🤝 **Professional Networks:** Connect with me directly on [LinkedIn Professional Workspace](https://linkedin.com) or follow live technical updates via my [X Platform Handler (@harigov63)](https://x.com).
+* 🚀 **Featured Project Deployment:** Review active operational structures at the [VANE-SPACE-SLA Platform Gateway](https://anticipatedd.github.io/VANE-SPACE-SLA)
+* 🤝 **Professional Networks:** Connect with me directly on [LinkedIn Professional Workspace](https://www.linkedin.com/in/mdabul1008) or follow live technical updates via my [X Platform Handler (@harigov63)](https://x.com/@harigov63).
 * 🛠️ **Active Production Hubs:** Maintained across structural engineering accounts:
-  * 📦 [Primary Core Hub — AnticipatedD](https://github.com)
-  * ⚙️ [Enterprise Core Hub — myou260312-eng](https://github.com)
+  * 📦 [Primary Core Hub — MD ABULHOSSAIN](https://github.com/AnticipatedD)
+  * ⚙️ [Enterprise Core Hub — MY Enterprise Account](https://github.com/myou260312-eng)
 """
 
     try:
