@@ -1,0 +1,44 @@
+name: Generate Profile README
+
+on:
+  push:
+    branches:
+      - main
+      - master
+    paths:
+      - 'generate_readme.py' # Fires workflow only when you update your stats file
+  workflow_dispatch: # Allows you to run this manually anytime from the Actions tab
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+    # Step 1: Check out your repository code
+    - name: Checkout Repository
+      uses: actions/checkout@v4
+
+    # Step 2: Set up a secure Python runtime environment
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.x'
+
+    # Step 3: Run your production script to compile the new markdown code
+    - name: Run Profile Generator Script
+      run: python generate_readme.py
+
+    # Step 4: Securely commit and push changes back to your profile repository
+    - name: Commit and Push Updated README
+      run: |
+        git config --local user.email "action@github.com"
+        git config --local user.name "GitHub Action Bot"
+        git add README.md
+        
+        # Check if changes exist before trying to commit to avoid workflow crash errors
+        if git diff --quiet && git diff --staged --quiet; then
+          echo "No structural updates detected in README.md. Skipping push."
+        else
+          git commit -m "chore: automated profile metrics synchronization [skip ci]"
+          git push
+        fi
