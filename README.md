@@ -303,4 +303,8 @@ mdahossain/
 
 ---
 
+## 🎖️ Executive Credentials Matrix
+👉 **[Click here to view my complete AMD ROCm, IBM, and Microsoft Credentials Portfolio Dashboard](./credentials/README.md)**
+
+---
 *Last Updated: 2026-07-28*
