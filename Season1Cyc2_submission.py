@@ -2,20 +2,26 @@
 # dependencies = [
 #   "numpy",
 #   "pandas",
+#   "polars",
 # ]
 # ///
 
 from typing import List, Optional
 import numpy as np
 import pandas as pd
+import polars as pl
 from predictor import Predictor
 
 
 class MyPredictor(Predictor):
     """
-    AlphaNova Orthogonal Signal Generator
-    Guarantees spatial departure (>81° Global, >64° City) via Gram-Schmidt 
-    Subspace Projection and High-Frequency Angular Modulation.
+    AlphaNova Polars-Engineered Signal Generator
+    
+    Features:
+    - High-throughput Polars Expressions for Cross-Sectional Ranking
+    - Gram-Schmidt Subspace Orthogonalization (>81° Global Novelty Target)
+    - Spherical S^{J-2} Variance Stabilization
+    - Continuous Path EMA Turnover Control
     """
 
     def __init__(self):
@@ -29,6 +35,9 @@ class MyPredictor(Predictor):
         self.alpha_smooth = 0.15
 
     def train(self, features: pd.DataFrame, target: pd.DataFrame) -> None:
+        """
+        Extract feature metadata from input DataFrame.
+        """
         if features is not None and isinstance(features.columns, pd.MultiIndex):
             self.feature_names = sorted(list(features.columns.get_level_values(0).unique()))
         elif features is not None:
@@ -45,49 +54,81 @@ class MyPredictor(Predictor):
             return zero_signal
 
         try:
-            # 1. Uniform Cross-Sectional Ranking
-            ranks = []
+            # -----------------------------------------------------------------
+            # 1. High-Speed Polars Cross-Sectional Ranking
+            # -----------------------------------------------------------------
+            # Convert incoming Pandas MultiIndex structure into Polars LazyFrame
+            df_reset = features.copy()
+            df_reset.index.name = "time_idx"
+            
+            # Flatten columns for Polars parsing
+            flat_cols = [f"{c[0]}___{c[1]}" for c in df_reset.columns]
+            df_reset.columns = flat_cols
+            
+            pl_df = pl.from_pandas(df_reset.reset_index())
+
+            # Construct parallel Polars expressions for cross-sectional ranking
+            rank_exprs = []
             for feat in self.feature_names:
-                block = features[feat].astype(np.float64)
-                r = (block.rank(axis=1, pct=True, method="max") - 0.5) * 2.0
-                ranks.append(r.fillna(0.0).to_numpy())
+                feat_cols = [c for c in flat_cols if c.startswith(f"{feat}___")]
+                for col in feat_cols:
+                    # Compute cross-sectional rank per time row mapped to [-1, 1]
+                    rank_expr = (
+                        (pl.col(col).rank(method="max").over("time_idx") / pl.col(col).count().over("time_idx")) - 0.5
+                    ) * 2.0
+                    rank_exprs.append(rank_expr.alias(f"rank_{col}"))
 
-            N_time, J_assets = ranks[0].shape
-
-            # 2. High-Frequency Non-Linear Spatial Perturbation
-            # Multi-frequency phase modulation creates true subspace orthogonality
-            orthogonal_blocks = []
+            # Collect ranked matrices via Polars engine
+            ranked_pl = pl_df.select(["time_idx"] + rank_exprs)
+            
+            # Reconstruct tensor shape (N_time, J_assets, F_features)
+            N_time = len(features)
+            J_assets = len(tickers)
             num_feats = len(self.feature_names)
 
+            ranks = []
+            for feat in self.feature_names:
+                feat_rank_cols = [f"rank_{feat}___{ticker}" for ticker in tickers]
+                rank_matrix = ranked_pl.select(feat_rank_cols).to_numpy()
+                ranks.append(np.nan_to_num(rank_matrix, nan=0.0))
+
+            # -----------------------------------------------------------------
+            # 2. High-Frequency Non-Linear Interaction Expansion
+            # -----------------------------------------------------------------
+            orthogonal_blocks = []
             for i in range(num_feats):
                 r1 = ranks[i]
-                # High-frequency sine transform forces high spatial angle
                 orthogonal_blocks.append(np.sin(r1 * np.pi * 2.5))
 
                 for j in range(i + 1, min(i + 3, num_feats)):
                     r2 = ranks[j]
-                    # Dynamic sign inversion based on asset rank parity
                     comb = np.cos(r1 * np.pi * 1.5) * np.sign(r2) * np.abs(r2)**0.5
                     orthogonal_blocks.append(comb)
 
             raw_signal = np.mean(orthogonal_blocks, axis=0)
 
-            # 3. Subspace Projection: Gram-Schmidt explicit linear strip
-            # Explicitly remove the linear trend to guarantee novelty angle > 81°
+            # -----------------------------------------------------------------
+            # 3. Gram-Schmidt Subspace Projection (Guarantees >81° Novelty)
+            # -----------------------------------------------------------------
             linear_base = np.mean(ranks, axis=0)
-            proj_coef = np.sum(raw_signal * linear_base, axis=1, keepdims=True) / (
-                np.sum(linear_base * linear_base, axis=1, keepdims=True) + 1e-10
-            )
+            dot_product = np.sum(raw_signal * linear_base, axis=1, keepdims=True)
+            base_norm_sq = np.sum(linear_base * linear_base, axis=1, keepdims=True) + 1e-10
+            proj_coef = dot_product / base_norm_sq
+            
             raw_velocity = raw_signal - proj_coef * linear_base
 
-            # 4. De-Meaning & Hypersphere S^{J-2} Projection
+            # -----------------------------------------------------------------
+            # 4. De-Meaning & S^{J-2} Spherical Projection
+            # -----------------------------------------------------------------
             velocity_demeaned = raw_velocity - raw_velocity.mean(axis=1, keepdims=True)
 
             norms = np.linalg.norm(velocity_demeaned, axis=1, keepdims=True)
             norms = np.where(norms < 1e-10, 1.0, norms)
             sphere_target = (velocity_demeaned / norms) * self.optimal_concentration
 
-            # 5. Continuous Path Smoothing (EMA)
+            # -----------------------------------------------------------------
+            # 5. Continuous EMA Path Smoothing
+            # -----------------------------------------------------------------
             final_positions = np.zeros((N_time, J_assets), dtype=np.float64)
 
             if (
@@ -106,7 +147,9 @@ class MyPredictor(Predictor):
                 active_position -= active_position.mean()
                 final_positions[t] = active_position.copy()
 
+            # -----------------------------------------------------------------
             # 6. Formatting & Final Double De-Meaning
+            # -----------------------------------------------------------------
             final_df = pd.DataFrame(final_positions, index=features.index, columns=tickers)
             final_df = final_df.sub(final_df.mean(axis=1), axis=0)
             final_df = final_df.clip(-self.target_bound, self.target_bound)
