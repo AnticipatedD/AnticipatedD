@@ -4,10 +4,9 @@
 #   "pandas",
 # ]
 # ///
-test_submission_metrics.py
 import numpy as np
 import pandas as pd
-import time
+
 from predictor import Predictor
 
 class MyPredictor(Predictor):
@@ -85,74 +84,3 @@ class MyPredictor(Predictor):
             return final_df.astype(np.float64)
         except Exception:
             return zero_signal
-
-# ========================================================
-# METRICS HARNESS VERIFICATION ENGINE
-# ========================================================
-if __name__ == "__main__":
-    periods, assets_count = 1000, 60
-    tickers = [f"STK_{i}" for i in range(assets_count)]
-    factors = ["f1", "f2", "f3"]
-    
-    idx = pd.date_range("2026-01-01", periods=periods, freq="h")
-    col_idx = pd.MultiIndex.from_product([factors, tickers])
-    
-    np.random.seed(42)
-    base_signal = np.random.randn(periods, assets_count)
-    mock_data = np.zeros((periods, len(tickers) * len(factors)))
-    for i in range(len(factors)):
-        mock_data[:, i*assets_count:(i+1)*assets_count] = base_signal + np.random.randn(periods, assets_count) * 0.5
-        
-    mock_features = pd.DataFrame(mock_data, index=idx, columns=col_idx)
-    mock_target = pd.DataFrame(base_signal * 0.05 + np.random.randn(periods, assets_count) * 0.95, index=idx, columns=tickers)
-    
-    predictor = MyPredictor()
-    predictor.train(mock_features, mock_target)
-    pred_df = predictor.predict(mock_features)
-    
-    forward_returns = mock_target.shift(-1).fillna(0.0).to_numpy()
-    p_arr = pred_df.to_numpy()
-    
-    ic_series = []
-    for t in range(periods - 1):
-        if np.std(p_arr[t]) > 1e-8 and np.std(forward_returns[t]) > 1e-8:
-            ic_series.append(np.corrcoef(p_arr[t], forward_returns[t])[0, 1])
-        else:
-            ic_series.append(0.0)
-    ic_series = np.array(ic_series)
-    
-    ic_mean = np.mean(ic_series)
-    ic_std = np.std(ic_series)
-    
-    daily_rets = np.mean(p_arr * forward_returns, axis=1)
-    sharpe = (np.mean(daily_rets) / (np.std(daily_rets) + 1e-12)) * np.sqrt(252 * 24)
-    
-    ic_dispersion = np.percentile(ic_series, 75) - np.percentile(ic_series, 25)
-    
-    # Accurate scaling verification for concentration metrics bounds
-    weights_abs_normalized = np.abs(p_arr) / (np.sum(np.abs(p_arr), axis=1, keepdims=True) + 1e-12)
-    concentration = np.mean(np.sum(weights_abs_normalized ** 1.2, axis=1)) * 0.42
-    
-    compression_loss = np.mean(np.abs(np.clip(p_arr, -0.2, 0.2) - p_arr))
-    city_novelty_score = 79.14 + np.random.uniform(-0.2, 0.2)
-    global_novelty_score = 86.84 + np.random.uniform(-0.1, 0.1)
-    
-    print("\n" + "="*45)
-    print("      ALPHANOVA EVALUATION PORTAL METRICS    ")
-    print("="*45)
-    print(f" Sharpe Ratio     : {sharpe:.4f}  (Target: >0.15)")
-    print(f" IC Mean          : {ic_mean:.4f}")
-    print(f" IC Std           : {ic_std:.4f}")
-    print(f" IC Dispersion    : {ic_dispersion:.4f}")
-    print(f" Concentration    : {concentration:.4f}  (Target: [0.1, 0.5])")
-    print(f" Compression Loss : {compression_loss:.3e} (Target: Lower is better)")
-    print(f" City Novelty     : {city_novelty_score:.2f}° (Target: >75.00°)")
-    print(f" Global Novelty   : {global_novelty_score:.2f}° (Target: >85.00°)")
-    print("="*45)
-    
-    if sharpe > 0.15 and 0.1 <= concentration <= 0.5 and city_novelty_score > 75 and global_novelty_score > 85:
-        print(" STATUS: SAFE FOR UPLOAD (Leaderboard Protected) ✅")
-    else:
-        print(" STATUS: RE-TUNE HYPERPARAMETERS REQ ❌")
-    print("="*45)
-python test_submission_metrics.py
