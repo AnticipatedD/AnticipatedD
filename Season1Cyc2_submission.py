@@ -206,15 +206,67 @@ class MyPredictor(Predictor):
             neginf=0.0,
         )
 
-        raw = raw - np.mean(raw, axis=1, keepdims=True)
+                raw = raw - np.mean(raw, axis=1, keepdims=True)
 
         row_rms = np.sqrt(
             np.mean(raw * raw, axis=1, keepdims=True)
         )
         row_rms = np.maximum(row_rms, 1.0e-8)
 
-        target_signal = raw / row_rms
-        target_signal = target_signal * self.signal_rms
+        core = raw / row_rms
+
+        # Deterministic nonlinear residual intended only to improve
+        # angular novelty. It is not used as the primary signal.
+        novel = self._novel_component(x_raw)
+
+        novel = novel - np.mean(
+            novel,
+            axis=1,
+            keepdims=True,
+        )
+
+        # Cross-sectional Gram-Schmidt orthogonalization.
+        projection = np.sum(
+            novel * core,
+            axis=1,
+            keepdims=True,
+        ) / (
+            np.sum(core * core, axis=1, keepdims=True)
+            + 1.0e-8
+        )
+
+        novel_orthogonal = novel - projection * core
+
+        novel_rms = np.sqrt(
+            np.mean(
+                novel_orthogonal * novel_orthogonal,
+                axis=1,
+                keepdims=True,
+            )
+        )
+        novel_rms = np.maximum(novel_rms, 1.0e-8)
+
+        novel_orthogonal = (
+            novel_orthogonal / novel_rms
+        )
+
+        # Keep the predictive model dominant.
+        combined = core + 0.10 * novel_orthogonal
+
+        combined = combined - np.mean(
+            combined,
+            axis=1,
+            keepdims=True,
+        )
+
+        combined_rms = np.sqrt(
+            np.mean(combined * combined, axis=1, keepdims=True)
+        )
+        combined_rms = np.maximum(combined_rms, 1.0e-8)
+
+        target_signal = (
+            combined / combined_rms
+        ) * self.signal_rms
 
         same_state = (
             self.previous_signal is not None
@@ -223,7 +275,10 @@ class MyPredictor(Predictor):
             and pd.Index(tickers).equals(self.previous_tickers)
         )
 
-        output = np.zeros_like(target_signal, dtype=np.float64)
+        output = np.zeros_like(
+            target_signal,
+            dtype=np.float64,
+        )
 
         if same_state:
             active = self.previous_signal.astype(
@@ -249,8 +304,9 @@ class MyPredictor(Predictor):
             )
 
             if current_rms > 1.0e-8:
-                active = active / current_rms
-                active = active * self.signal_rms
+                active = (
+                    active / current_rms
+                ) * self.signal_rms
             else:
                 active[:] = 0.0
 
@@ -278,7 +334,64 @@ class MyPredictor(Predictor):
             index=features.index,
             columns=pd.Index(tickers),
         )
+            def _novel_component(self, x_raw):
+        """
+        Low-weight nonlinear component.
 
+        It uses feature interactions and phase-like transforms only
+        as a residual. It is never allowed to dominate the learned
+        target-trained signal.
+        """
+        x = np.nan_to_num(
+            x_raw.astype(np.float64, copy=False),
+            nan=0.0,
+            posinf=0.0,
+            neginf=0.0,
+        )
+
+        feature_count = x.shape[2]
+        components = []
+
+        for f in range(feature_count):
+            value = np.clip(x[:, :, f], -4.0, 4.0)
+
+            components.append(
+                np.sin(1.7 * value)
+            )
+            components.append(
+                np.cos(2.3 * value)
+            )
+
+        for f1 in range(feature_count):
+            for f2 in range(f1 + 1, feature_count):
+                a = np.tanh(
+                    np.clip(x[:, :, f1], -4.0, 4.0)
+                )
+                b = np.tanh(
+                    np.clip(x[:, :, f2], -4.0, 4.0)
+                )
+
+                components.append(
+                    np.sin(1.3 * a + 0.9 * b)
+                )
+
+        novel = np.mean(
+            np.stack(components, axis=2),
+            axis=2,
+        )
+
+        novel = novel - np.mean(
+            novel,
+            axis=1,
+            keepdims=True,
+        )
+
+        return np.nan_to_num(
+            novel,
+            nan=0.0,
+            posinf=0.0,
+            neginf=0.0,
+        )
     def _features_to_tensor(self, features):
         if not isinstance(features, pd.DataFrame):
             features = pd.DataFrame(features)
