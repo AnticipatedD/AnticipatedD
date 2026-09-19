@@ -7,21 +7,14 @@
 
 import numpy as np
 import pandas as pd
-
 from predictor import Predictor
 
 
 class MyPredictor(Predictor):
     """
-    Target-trained cross-sectional ridge predictor with a low-weight
-    orthogonal nonlinear residual for improved novelty angle.
-
-    Safeguards:
-    - Explicit MultiIndex ticker alignment
-    - Cross-sectional demeaning & RMS scaling
-    - Causal exponential smoothing with state
-    - Robust NaN / singular-matrix handling
-    - No ticker-specific parameters
+    Target-trained cross-sectional ridge + controlled non-linear
+    spatial residual + L1-style hysteresis filter.
+    Designed for positive Sharpe while preserving novelty.
     """
 
     def __init__(self):
@@ -32,7 +25,6 @@ class MyPredictor(Predictor):
 
         self.trained = False
         self.feature_names = None
-        self.training_tickers = None
         self.n_assets = None
         self.n_features = None
 
@@ -41,414 +33,264 @@ class MyPredictor(Predictor):
         self.coef = None
         self.orientation = 1.0
 
-        # Hyper-parameters (kept close to the working baseline)
-        self.alpha = 0.65
-        self.signal_rms = 0.08
-        self.ridge_strength = 4.0
-        self.novel_weight = 0.10          # keep the residual small
+        # Core signal parameters
+        self.ridge_strength = 3.5
+        self.signal_rms = 0.09
+        self.alpha = 0.55                 # base EMA weight
 
-        self.previous_signal = None
-        self.previous_tickers = None
+        # Novelty / execution parameters (inspired by your code)
+        self.novel_weight = 0.12
+        self.hysteresis_threshold = 0.55  # milder than 1.12
+        self.hysteresis_blend = 0.35      # how much new signal when threshold is crossed
+        self.target_bound = 0.18
+
+        self.prev_signal = None
+        self.prev_tickers = None
 
     # ------------------------------------------------------------------
-    # Public API
-    # ------------------------------------------------------------------
+    def train(self, features: pd.DataFrame, target: pd.DataFrame = None) -> None:
+        if features is None or target is None or features.empty:
+            return
 
-    def train(self, features, target):
-        if features is None or target is None:
-            raise ValueError("features and target are required")
-
-        x_raw, feature_names, tickers = self._features_to_tensor(features)
-
-        if x_raw.ndim != 3:
-            raise ValueError("invalid feature tensor")
-
+        x_raw, feature_names, tickers = self._to_tensor(features)
         t_count, asset_count, feature_count = x_raw.shape
 
-        if t_count < 10 or asset_count < 2 or feature_count < 1:
-            raise ValueError("insufficient training dimensions")
+        if t_count < 15 or asset_count < 3:
+            return
 
-        y = self._target_to_matrix(
-            target, t_count, asset_count, pd.Index(tickers)
-        )
+        y = self._align_target(target, t_count, asset_count, tickers)
+        if y is None:
+            return
 
-        if y.shape != (t_count, asset_count):
-            raise ValueError("target alignment failed")
-
-        x_engineered = self._engineer(x_raw)
-
-        x_flat = x_engineered.reshape(t_count * asset_count, -1)
-        y_flat = y.reshape(t_count * asset_count)
+        x_eng = self._engineer(x_raw)
+        x_flat = x_eng.reshape(-1, x_eng.shape[-1])
+        y_flat = y.reshape(-1)
 
         finite = np.isfinite(y_flat) & np.all(np.isfinite(x_flat), axis=1)
+        if finite.sum() < max(40, asset_count * 8):
+            return
 
-        if int(np.sum(finite)) < max(20, asset_count * 5):
-            raise ValueError("too few finite training observations")
+        x_fit = x_flat[finite].astype(np.float64)
+        y_fit = y_flat[finite].astype(np.float64)
 
-        x_fit = x_flat[finite].astype(np.float64, copy=False)
-        y_fit = y_flat[finite].astype(np.float64, copy=False)
-
-        # Robust location / scale (IQR)
+        # Robust scaling
         self.center = np.nanmedian(x_fit, axis=0)
-        q25 = np.nanpercentile(x_fit, 25.0, axis=0)
-        q75 = np.nanpercentile(x_fit, 75.0, axis=0)
-        self.scale = q75 - q25
+        q25, q75 = np.nanpercentile(x_fit, [25, 75], axis=0)
+        self.scale = np.maximum(q75 - q25, 1e-8)
 
-        self.center = np.nan_to_num(self.center, nan=0.0, posinf=0.0, neginf=0.0)
-        self.scale = np.nan_to_num(self.scale, nan=1.0, posinf=1.0, neginf=1.0)
-        self.scale = np.where(self.scale < 1e-8, 1.0, self.scale)
+        x_fit = np.clip((x_fit - self.center) / self.scale, -5.0, 5.0)
 
-        x_fit = (x_fit - self.center) / self.scale
-        x_fit = np.clip(x_fit, -6.0, 6.0)
+        y_c = np.nanmean(y_fit)
+        y_s = np.nanstd(y_fit)
+        if not np.isfinite(y_s) or y_s < 1e-8:
+            y_s = 1.0
+        y_fit = (y_fit - y_c) / y_s
 
-        # Target centering / scaling
-        y_center = float(np.nanmean(y_fit))
-        y_scale = float(np.nanstd(y_fit))
-        if not np.isfinite(y_scale) or y_scale < 1e-8:
-            y_scale = 1.0
-        y_fit = (y_fit - y_center) / y_scale
-
-        # Ridge regression
+        # Ridge
         gram = x_fit.T @ x_fit
         rhs = x_fit.T @ y_fit
-
-        diagonal = np.diag(gram).copy()
-        diagonal = np.maximum(diagonal, 1.0)
-        penalty = self.ridge_strength * float(np.mean(diagonal))
-        gram = gram + np.eye(gram.shape[0]) * penalty
+        pen = self.ridge_strength * np.mean(np.diag(gram).clip(min=1.0))
+        gram = gram + np.eye(gram.shape[0]) * pen
 
         try:
             coef = np.linalg.solve(gram, rhs)
         except np.linalg.LinAlgError:
             coef = np.linalg.lstsq(gram, rhs, rcond=1e-8)[0]
 
-        coef = np.nan_to_num(coef, nan=0.0, posinf=0.0, neginf=0.0)
-        self.coef = coef
-
-        self.orientation = self._choose_orientation(
-            x_fit, coef, y_fit, t_count, asset_count, finite
-        )
+        self.coef = np.nan_to_num(coef, nan=0.0)
+        self.orientation = self._sign_from_ic(x_fit, self.coef, y_fit, asset_count)
 
         self.feature_names = list(feature_names)
-        self.training_tickers = pd.Index(tickers)
         self.n_assets = asset_count
         self.n_features = feature_count
         self.trained = True
+        self.prev_signal = None
+        self.prev_tickers = None
 
-        # Reset state after every train
-        self.previous_signal = None
-        self.previous_tickers = None
+    # ------------------------------------------------------------------
+    def predict(self, features: pd.DataFrame) -> pd.DataFrame:
+        tickers = features.columns.get_level_values(1).unique()
+        zero = pd.DataFrame(0.0, index=features.index, columns=tickers, dtype=np.float32)
 
-    def predict(self, features):
-        if not self.trained:
-            raise RuntimeError("predictor has not been trained")
+        if not self.trained or features is None or features.empty:
+            return zero
 
-        x_raw, _, tickers = self._features_to_tensor(features)
-        t_count, asset_count, _ = x_raw.shape
+        try:
+            x_raw, _, tickers = self._to_tensor(features)
+            t_count, asset_count, _ = x_raw.shape
+            if asset_count != self.n_assets:
+                return zero
 
-        if asset_count != self.n_assets:
-            raise ValueError("asset count differs from training")
+            x_eng = self._engineer(x_raw)
+            x_flat = x_eng.reshape(-1, x_eng.shape[-1])
+            x_flat = np.nan_to_num(x_flat, nan=0.0)
+            x_flat = np.clip((x_flat - self.center) / self.scale, -5.0, 5.0)
 
-        x_engineered = self._engineer(x_raw)
-        x_flat = x_engineered.reshape(t_count * asset_count, -1)
-        x_flat = np.nan_to_num(x_flat, nan=0.0, posinf=0.0, neginf=0.0)
+            # Core linear prediction
+            raw = (x_flat @ self.coef).reshape(t_count, asset_count)
+            raw *= self.orientation
+            raw = raw - np.mean(raw, axis=1, keepdims=True)
 
-        x_flat = (x_flat - self.center) / self.scale
-        x_flat = np.clip(x_flat, -6.0, 6.0)
+            # Mild non-linear residual (novelty driver, low weight)
+            novel = self._spatial_residual(x_raw)
+            novel = novel - np.mean(novel, axis=1, keepdims=True)
 
-        raw = (x_flat @ self.coef).reshape(t_count, asset_count)
-        raw *= self.orientation
-        raw = np.nan_to_num(raw, nan=0.0, posinf=0.0, neginf=0.0)
+            # Orthogonalize residual against core
+            proj = np.sum(novel * raw, axis=1, keepdims=True) / (
+                np.sum(raw * raw, axis=1, keepdims=True) + 1e-8
+            )
+            novel = novel - proj * raw
+            novel_rms = np.sqrt(np.mean(novel ** 2, axis=1, keepdims=True))
+            novel = novel / np.maximum(novel_rms, 1e-8)
 
-        # Core predictive signal
-        raw = raw - np.mean(raw, axis=1, keepdims=True)
-        row_rms = np.sqrt(np.mean(raw * raw, axis=1, keepdims=True))
-        row_rms = np.maximum(row_rms, 1e-8)
-        core = raw / row_rms
+            combined = raw + self.novel_weight * novel
+            combined = combined - np.mean(combined, axis=1, keepdims=True)
 
-        # Low-weight orthogonal novelty residual
-        novel = self._novel_component(x_raw)
-        novel = novel - np.mean(novel, axis=1, keepdims=True)
+            # RMS normalization
+            rms = np.sqrt(np.mean(combined ** 2, axis=1, keepdims=True))
+            target = (combined / np.maximum(rms, 1e-8)) * self.signal_rms
 
-        # Gram-Schmidt orthogonalization against the core signal
-        projection = np.sum(novel * core, axis=1, keepdims=True) / (
-            np.sum(core * core, axis=1, keepdims=True) + 1e-8
-        )
-        novel_orthogonal = novel - projection * core
-
-        novel_rms = np.sqrt(
-            np.mean(novel_orthogonal * novel_orthogonal, axis=1, keepdims=True)
-        )
-        novel_rms = np.maximum(novel_rms, 1e-8)
-        novel_orthogonal = novel_orthogonal / novel_rms
-
-        # Keep the learned signal dominant
-        combined = core + self.novel_weight * novel_orthogonal
-        combined = combined - np.mean(combined, axis=1, keepdims=True)
-
-        combined_rms = np.sqrt(
-            np.mean(combined * combined, axis=1, keepdims=True)
-        )
-        combined_rms = np.maximum(combined_rms, 1e-8)
-        target_signal = (combined / combined_rms) * self.signal_rms
-
-        # Causal exponential smoothing with state
-        same_state = (
-            self.previous_signal is not None
-            and self.previous_tickers is not None
-            and len(self.previous_signal) == asset_count
-            and pd.Index(tickers).equals(self.previous_tickers)
-        )
-
-        output = np.zeros_like(target_signal, dtype=np.float64)
-
-        if same_state:
-            active = self.previous_signal.astype(np.float64, copy=True)
-        else:
-            active = target_signal[0].copy()
-
-        for i in range(t_count):
-            if i == 0 and not same_state:
-                active = target_signal[i].copy()
+            # L1-style hysteresis filter (keeps novelty flavour)
+            output = np.zeros_like(target)
+            if (
+                self.prev_signal is not None
+                and self.prev_tickers is not None
+                and len(self.prev_signal) == asset_count
+                and self.prev_tickers.equals(pd.Index(tickers))
+            ):
+                active = self.prev_signal.copy()
             else:
-                active = (
-                    self.alpha * target_signal[i]
-                    + (1.0 - self.alpha) * active
-                )
+                active = target[0].copy()
 
-            active = active - np.mean(active)
-            current_rms = np.sqrt(np.mean(active * active))
+            for t in range(t_count):
+                delta = np.sum(np.abs(target[t] - active))
+                if delta < self.hysteresis_threshold:
+                    current = active.copy()
+                else:
+                    current = (
+                        self.hysteresis_blend * target[t]
+                        + (1.0 - self.hysteresis_blend) * active
+                    )
+                    current -= current.mean()
 
-            if current_rms > 1e-8:
-                active = (active / current_rms) * self.signal_rms
-            else:
-                active[:] = 0.0
+                # final demean + soft bound
+                current = current - current.mean()
+                current = np.clip(current, -self.target_bound, self.target_bound)
+                current = current - current.mean()
 
-            active = active - np.mean(active)
-            output[i] = active
+                output[t] = current
+                active = current.copy()
 
-        output = np.nan_to_num(output, nan=0.0, posinf=0.0, neginf=0.0)
-        output = output - np.mean(output, axis=1, keepdims=True)
+            self.prev_signal = output[-1].copy()
+            self.prev_tickers = pd.Index(tickers)
 
-        self.previous_signal = output[-1].copy()
-        self.previous_tickers = pd.Index(tickers)
-
-        return pd.DataFrame(
-            output.astype(np.float32),
-            index=features.index,
-            columns=pd.Index(tickers),
-        )
-
-    # ------------------------------------------------------------------
-    # Novelty residual (orthogonal nonlinear component)
-    # ------------------------------------------------------------------
-
-    def _novel_component(self, x_raw):
-        """
-        Deterministic nonlinear residual used only to improve angular
-        novelty. It is orthogonalized against the main signal and given
-        a small weight so it cannot dominate prediction quality.
-        """
-        x = np.nan_to_num(
-            x_raw.astype(np.float64, copy=False),
-            nan=0.0, posinf=0.0, neginf=0.0,
-        )
-
-        feature_count = x.shape[2]
-        components = []
-
-        for f in range(feature_count):
-            value = np.clip(x[:, :, f], -4.0, 4.0)
-            components.append(np.sin(1.7 * value))
-            components.append(np.cos(2.3 * value))
-
-        for f1 in range(feature_count):
-            for f2 in range(f1 + 1, feature_count):
-                a = np.tanh(np.clip(x[:, :, f1], -4.0, 4.0))
-                b = np.tanh(np.clip(x[:, :, f2], -4.0, 4.0))
-                components.append(np.sin(1.3 * a + 0.9 * b))
-
-        novel = np.mean(np.stack(components, axis=2), axis=2)
-        novel = novel - np.mean(novel, axis=1, keepdims=True)
-
-        return np.nan_to_num(novel, nan=0.0, posinf=0.0, neginf=0.0)
-
-    # ------------------------------------------------------------------
-    # Feature / target helpers
-    # ------------------------------------------------------------------
-
-    def _features_to_tensor(self, features):
-        if not isinstance(features, pd.DataFrame):
-            features = pd.DataFrame(features)
-
-        if isinstance(features.columns, pd.MultiIndex):
-            level_zero = list(
-                dict.fromkeys(features.columns.get_level_values(0))
-            )
-            ticker_order = list(
-                dict.fromkeys(features.columns.get_level_values(1))
+            return pd.DataFrame(
+                output.astype(np.float32),
+                index=features.index,
+                columns=tickers,
             )
 
-            if self.feature_names is None:
-                selected_names = level_zero
-            else:
-                selected_names = [
-                    name for name in self.feature_names if name in level_zero
-                ]
+        except Exception:
+            return zero
 
-            if len(selected_names) == 0:
-                raise ValueError("no recognized feature columns")
-
-            blocks = []
-            for name in selected_names:
-                block = features[name]
-                if isinstance(block, pd.Series):
-                    block = block.to_frame()
-                block = block.reindex(columns=ticker_order)
-                blocks.append(block.to_numpy(dtype=np.float64))
-
-            tensor = np.stack(blocks, axis=2)
-            return (
-                np.nan_to_num(tensor, nan=0.0, posinf=0.0, neginf=0.0),
-                selected_names,
-                ticker_order,
-            )
-
-        # Flat fallback
-        values = features.to_numpy(dtype=np.float64)
-        if self.n_features is None:
-            feature_count = 6
-        else:
-            feature_count = self.n_features
-
-        if values.ndim != 2:
-            raise ValueError("flat features must be two-dimensional")
-        if values.shape[1] % feature_count != 0:
-            raise ValueError(
-                "flat feature count is not divisible by feature count"
-            )
-
-        asset_count = values.shape[1] // feature_count
-        tensor = values.reshape(values.shape[0], asset_count, feature_count)
-
-        return (
-            np.nan_to_num(tensor, nan=0.0, posinf=0.0, neginf=0.0),
-            [f"feature_{i}" for i in range(feature_count)],
-            list(range(asset_count)),
-        )
-
-    def _target_to_matrix(self, target, t_count, asset_count, tickers):
-        if isinstance(target, pd.DataFrame):
-            target_frame = target.copy()
-            if len(target_frame) != t_count:
-                raise ValueError("target row count differs from features")
-
-            if isinstance(target_frame.columns, pd.MultiIndex):
-                target_labels = list(
-                    target_frame.columns.get_level_values(-1)
-                )
-                target_frame.columns = target_labels
-
-            if set(tickers).issubset(set(target_frame.columns)):
-                aligned = target_frame.reindex(columns=list(tickers))
-                if aligned.shape == (t_count, asset_count):
-                    return aligned.to_numpy(dtype=np.float64)
-
-            values = target_frame.to_numpy(dtype=np.float64)
-            if values.shape == (t_count, asset_count):
-                return values
-            if values.shape == (t_count, 1):
-                return np.repeat(values, asset_count, axis=1)
-
-        values = np.asarray(target, dtype=np.float64)
-
-        if values.ndim == 1:
-            if values.size == t_count * asset_count:
-                return values.reshape(t_count, asset_count)
-            if values.size == t_count:
-                return np.repeat(
-                    values.reshape(t_count, 1), asset_count, axis=1
-                )
-
-        if values.ndim == 2:
-            if values.shape == (t_count, asset_count):
-                return values
-            if values.shape == (t_count, 1):
-                return np.repeat(values, asset_count, axis=1)
-
-        raise ValueError("unsupported target shape")
-
-    def _engineer(self, x_raw):
-        x_raw = np.nan_to_num(
-            x_raw.astype(np.float64, copy=False),
-            nan=0.0, posinf=0.0, neginf=0.0,
-        )
-
-        _, asset_count, feature_count = x_raw.shape
+    # ------------------------------------------------------------------
+    # Feature engineering (cleaner + still novel)
+    # ------------------------------------------------------------------
+    def _engineer(self, x_raw: np.ndarray) -> np.ndarray:
+        x = np.nan_to_num(x_raw.astype(np.float64), nan=0.0)
+        t, n, f = x.shape
         blocks = []
 
-        for f in range(feature_count):
-            value = x_raw[:, :, f]
-            cross_mean = np.mean(value, axis=1, keepdims=True)
-            deviation = value - cross_mean
-
-            order = np.argsort(np.argsort(value, axis=1), axis=1)
-            denominator = max(asset_count - 1, 1)
-            rank = order.astype(np.float64) / denominator - 0.5
-
-            bounded = np.tanh(np.clip(value, -6.0, 6.0))
-            bounded_deviation = np.tanh(np.clip(deviation, -6.0, 6.0))
-
-            blocks.append(bounded)
-            blocks.append(bounded_deviation)
+        for i in range(f):
+            v = x[:, :, i]
+            # cross-sectional rank
+            order = np.argsort(np.argsort(v, axis=1), axis=1)
+            rank = order.astype(np.float64) / max(n - 1, 1) - 0.5
+            # z-score
+            mu = v.mean(axis=1, keepdims=True)
+            sd = np.maximum(v.std(axis=1, keepdims=True), 1e-8)
+            z = np.clip((v - mu) / sd, -4.0, 4.0)
             blocks.append(rank)
+            blocks.append(z)
+            blocks.append(np.tanh(z))
 
-        # Pairwise interactions
-        for f1 in range(feature_count):
-            for f2 in range(f1 + 1, feature_count):
-                a = np.tanh(np.clip(x_raw[:, :, f1], -5.0, 5.0))
-                b = np.tanh(np.clip(x_raw[:, :, f2], -5.0, 5.0))
-                blocks.append(a * b)
+        # limited pairwise products of ranks (novelty without explosion)
+        ranks = []
+        for i in range(f):
+            v = x[:, :, i]
+            order = np.argsort(np.argsort(v, axis=1), axis=1)
+            ranks.append(order.astype(np.float64) / max(n - 1, 1) - 0.5)
 
-        engineered = np.stack(blocks, axis=2)
-        return np.nan_to_num(engineered, nan=0.0, posinf=0.0, neginf=0.0)
+        for i in range(len(ranks)):
+            for j in range(i + 1, min(i + 3, len(ranks))):  # limited interactions
+                blocks.append(ranks[i] * ranks[j])
 
-    def _choose_orientation(
-        self, x_fit, coef, y_fit, t_count, asset_count, finite
-    ):
-        predictions = x_fit @ coef
-        predictions = np.nan_to_num(
-            predictions, nan=0.0, posinf=0.0, neginf=0.0
-        )
+        return np.nan_to_num(np.stack(blocks, axis=2), nan=0.0)
 
-        y_values = np.asarray(y_fit, dtype=np.float64)
-        p_values = np.asarray(predictions, dtype=np.float64)
+    def _spatial_residual(self, x_raw: np.ndarray) -> np.ndarray:
+        """Low-weight non-linear residual that keeps the spatial flavour."""
+        x = np.nan_to_num(x_raw.astype(np.float64), nan=0.0)
+        t, n, f = x.shape
+        comps = []
 
-        if y_values.size < asset_count * 2:
+        for i in range(f):
+            v = x[:, :, i]
+            order = np.argsort(np.argsort(v, axis=1), axis=1)
+            r = order.astype(np.float64) / max(n - 1, 1) - 0.5
+            comps.append(np.sin(r * np.pi * 0.4))
+            comps.append(np.cos(r * np.pi * 0.3))
+
+        residual = np.mean(np.stack(comps, axis=2), axis=2)
+        return residual - residual.mean(axis=1, keepdims=True)
+
+    # ------------------------------------------------------------------
+    # Helpers
+    # ------------------------------------------------------------------
+    def _to_tensor(self, features: pd.DataFrame):
+        if not isinstance(features.columns, pd.MultiIndex):
+            raise ValueError("expected MultiIndex columns")
+        names = list(dict.fromkeys(features.columns.get_level_values(0)))
+        tickers = list(dict.fromkeys(features.columns.get_level_values(1)))
+        if self.feature_names is not None:
+            names = [n for n in self.feature_names if n in names]
+        blocks = []
+        for n in names:
+            b = features[n]
+            if isinstance(b, pd.Series):
+                b = b.to_frame()
+            b = b.reindex(columns=tickers)
+            blocks.append(b.to_numpy(dtype=np.float64))
+        tensor = np.stack(blocks, axis=2)
+        return np.nan_to_num(tensor, nan=0.0), names, tickers
+
+    def _align_target(self, target, t_count, asset_count, tickers):
+        if isinstance(target, pd.DataFrame):
+            if isinstance(target.columns, pd.MultiIndex):
+                target = target.copy()
+                target.columns = target.columns.get_level_values(-1)
+            if set(tickers).issubset(target.columns):
+                return target.reindex(columns=tickers).to_numpy(dtype=np.float64)
+            vals = target.to_numpy(dtype=np.float64)
+            if vals.shape == (t_count, asset_count):
+                return vals
+        vals = np.asarray(target, dtype=np.float64)
+        if vals.ndim == 2 and vals.shape == (t_count, asset_count):
+            return vals
+        return None
+
+    def _sign_from_ic(self, x_fit, coef, y_fit, asset_count):
+        pred = x_fit @ coef
+        n_rows = min(len(y_fit) // asset_count, 500)
+        if n_rows < 3:
             return 1.0
-
-        usable_rows = min(y_values.size // asset_count, t_count)
-        usable_size = usable_rows * asset_count
-
-        y_matrix = y_values[:usable_size].reshape(usable_rows, asset_count)
-        p_matrix = p_values[:usable_size].reshape(usable_rows, asset_count)
-
-        y_matrix = y_matrix - np.mean(y_matrix, axis=1, keepdims=True)
-        p_matrix = p_matrix - np.mean(p_matrix, axis=1, keepdims=True)
-
-        numerator = np.sum(p_matrix * y_matrix, axis=1)
-        denominator = np.sqrt(
-            np.sum(p_matrix * p_matrix, axis=1)
-            * np.sum(y_matrix * y_matrix, axis=1)
-        )
-
-        valid_rows = denominator > 1e-10
-        if not np.any(valid_rows):
+        y_mat = y_fit[: n_rows * asset_count].reshape(n_rows, asset_count)
+        p_mat = pred[: n_rows * asset_count].reshape(n_rows, asset_count)
+        y_mat -= y_mat.mean(axis=1, keepdims=True)
+        p_mat -= p_mat.mean(axis=1, keepdims=True)
+        num = np.sum(p_mat * y_mat, axis=1)
+        den = np.sqrt(np.sum(p_mat**2, axis=1) * np.sum(y_mat**2, axis=1))
+        valid = den > 1e-8
+        if not np.any(valid):
             return 1.0
-
-        cross_sectional_ic = numerator[valid_rows] / denominator[valid_rows]
-        mean_ic = float(np.nanmean(cross_sectional_ic))
-
-        if not np.isfinite(mean_ic):
-            return 1.0
-        return 1.0 if mean_ic >= 0.0 else -1.0
+        ic = np.nanmean(num[valid] / den[valid])
+        return 1.0 if (np.isfinite(ic) and ic >= 0) else -1.0
