@@ -13,10 +13,15 @@ from predictor import Predictor
 
 class MyPredictor(Predictor):
     """
-    Cross-sectional target-trained ridge with MAD scaling,
-    rank-augmented features, and soft-clip exponential smoothing.
-    Designed for higher novelty distance while remaining causal
-    and ticker-agnostic.
+    Target-trained cross-sectional ridge predictor with a low-weight
+    orthogonal nonlinear residual for improved novelty angle.
+
+    Safeguards:
+    - Explicit MultiIndex ticker alignment
+    - Cross-sectional demeaning & RMS scaling
+    - Causal exponential smoothing with state
+    - Robust NaN / singular-matrix handling
+    - No ticker-specific parameters
     """
 
     def __init__(self):
@@ -36,14 +41,18 @@ class MyPredictor(Predictor):
         self.coef = None
         self.orientation = 1.0
 
-        # Smoothing and position scale – deliberately different from prior
-        self.alpha = 0.42          # more reactive than 0.65
-        self.signal_rms = 0.11     # slightly higher gross exposure target
-        self.ridge_rel = 0.35      # relative ridge strength (new formulation)
-        self.clip_level = 4.5
+        # Hyper-parameters (kept close to the working baseline)
+        self.alpha = 0.65
+        self.signal_rms = 0.08
+        self.ridge_strength = 4.0
+        self.novel_weight = 0.10          # keep the residual small
 
         self.previous_signal = None
         self.previous_tickers = None
+
+    # ------------------------------------------------------------------
+    # Public API
+    # ------------------------------------------------------------------
 
     def train(self, features, target):
         if features is None or target is None:
@@ -56,7 +65,7 @@ class MyPredictor(Predictor):
 
         t_count, asset_count, feature_count = x_raw.shape
 
-        if t_count < 12 or asset_count < 2 or feature_count < 1:
+        if t_count < 10 or asset_count < 2 or feature_count < 1:
             raise ValueError("insufficient training dimensions")
 
         y = self._target_to_matrix(
@@ -66,46 +75,46 @@ class MyPredictor(Predictor):
         if y.shape != (t_count, asset_count):
             raise ValueError("target alignment failed")
 
-        x_eng = self._engineer(x_raw)
+        x_engineered = self._engineer(x_raw)
 
-        x_flat = x_eng.reshape(t_count * asset_count, -1)
+        x_flat = x_engineered.reshape(t_count * asset_count, -1)
         y_flat = y.reshape(t_count * asset_count)
 
         finite = np.isfinite(y_flat) & np.all(np.isfinite(x_flat), axis=1)
 
-        if int(np.sum(finite)) < max(30, asset_count * 6):
+        if int(np.sum(finite)) < max(20, asset_count * 5):
             raise ValueError("too few finite training observations")
 
         x_fit = x_flat[finite].astype(np.float64, copy=False)
         y_fit = y_flat[finite].astype(np.float64, copy=False)
 
-        # Robust location / scale (MAD)
+        # Robust location / scale (IQR)
         self.center = np.nanmedian(x_fit, axis=0)
-        mad = np.nanmedian(np.abs(x_fit - self.center), axis=0)
-        self.scale = 1.4826 * mad          # consistent with normal std
+        q25 = np.nanpercentile(x_fit, 25.0, axis=0)
+        q75 = np.nanpercentile(x_fit, 75.0, axis=0)
+        self.scale = q75 - q25
 
         self.center = np.nan_to_num(self.center, nan=0.0, posinf=0.0, neginf=0.0)
         self.scale = np.nan_to_num(self.scale, nan=1.0, posinf=1.0, neginf=1.0)
         self.scale = np.where(self.scale < 1e-8, 1.0, self.scale)
 
         x_fit = (x_fit - self.center) / self.scale
-        x_fit = np.clip(x_fit, -self.clip_level, self.clip_level)
+        x_fit = np.clip(x_fit, -6.0, 6.0)
 
         # Target centering / scaling
-        y_c = float(np.nanmean(y_fit))
-        y_s = float(np.nanstd(y_fit))
-        if not np.isfinite(y_s) or y_s < 1e-8:
-            y_s = 1.0
-        y_fit = (y_fit - y_c) / y_s
+        y_center = float(np.nanmean(y_fit))
+        y_scale = float(np.nanstd(y_fit))
+        if not np.isfinite(y_scale) or y_scale < 1e-8:
+            y_scale = 1.0
+        y_fit = (y_fit - y_center) / y_scale
 
-        # Ridge via relative penalty on Gram
+        # Ridge regression
         gram = x_fit.T @ x_fit
         rhs = x_fit.T @ y_fit
 
-        fro = np.linalg.norm(gram, ord="fro")
-        if not np.isfinite(fro) or fro < 1e-12:
-            fro = 1.0
-        penalty = self.ridge_rel * fro / max(gram.shape[0], 1)
+        diagonal = np.diag(gram).copy()
+        diagonal = np.maximum(diagonal, 1.0)
+        penalty = self.ridge_strength * float(np.mean(diagonal))
         gram = gram + np.eye(gram.shape[0]) * penalty
 
         try:
@@ -140,25 +149,48 @@ class MyPredictor(Predictor):
         if asset_count != self.n_assets:
             raise ValueError("asset count differs from training")
 
-        x_eng = self._engineer(x_raw)
-        x_flat = x_eng.reshape(t_count * asset_count, -1)
+        x_engineered = self._engineer(x_raw)
+        x_flat = x_engineered.reshape(t_count * asset_count, -1)
         x_flat = np.nan_to_num(x_flat, nan=0.0, posinf=0.0, neginf=0.0)
 
         x_flat = (x_flat - self.center) / self.scale
-        x_flat = np.clip(x_flat, -self.clip_level, self.clip_level)
+        x_flat = np.clip(x_flat, -6.0, 6.0)
 
         raw = (x_flat @ self.coef).reshape(t_count, asset_count)
         raw *= self.orientation
         raw = np.nan_to_num(raw, nan=0.0, posinf=0.0, neginf=0.0)
 
-        # Cross-sectional demean + soft clip
+        # Core predictive signal
         raw = raw - np.mean(raw, axis=1, keepdims=True)
-        raw = np.tanh(raw / 2.0) * 2.0          # soft non-linearity
-
-        # Per-row RMS normalization to target
         row_rms = np.sqrt(np.mean(raw * raw, axis=1, keepdims=True))
         row_rms = np.maximum(row_rms, 1e-8)
-        target = (raw / row_rms) * self.signal_rms
+        core = raw / row_rms
+
+        # Low-weight orthogonal novelty residual
+        novel = self._novel_component(x_raw)
+        novel = novel - np.mean(novel, axis=1, keepdims=True)
+
+        # Gram-Schmidt orthogonalization against the core signal
+        projection = np.sum(novel * core, axis=1, keepdims=True) / (
+            np.sum(core * core, axis=1, keepdims=True) + 1e-8
+        )
+        novel_orthogonal = novel - projection * core
+
+        novel_rms = np.sqrt(
+            np.mean(novel_orthogonal * novel_orthogonal, axis=1, keepdims=True)
+        )
+        novel_rms = np.maximum(novel_rms, 1e-8)
+        novel_orthogonal = novel_orthogonal / novel_rms
+
+        # Keep the learned signal dominant
+        combined = core + self.novel_weight * novel_orthogonal
+        combined = combined - np.mean(combined, axis=1, keepdims=True)
+
+        combined_rms = np.sqrt(
+            np.mean(combined * combined, axis=1, keepdims=True)
+        )
+        combined_rms = np.maximum(combined_rms, 1e-8)
+        target_signal = (combined / combined_rms) * self.signal_rms
 
         # Causal exponential smoothing with state
         same_state = (
@@ -168,28 +200,31 @@ class MyPredictor(Predictor):
             and pd.Index(tickers).equals(self.previous_tickers)
         )
 
-        output = np.zeros_like(target, dtype=np.float64)
+        output = np.zeros_like(target_signal, dtype=np.float64)
 
         if same_state:
             active = self.previous_signal.astype(np.float64, copy=True)
         else:
-            active = target[0].copy()
+            active = target_signal[0].copy()
 
         for i in range(t_count):
             if i == 0 and not same_state:
-                active = target[i].copy()
+                active = target_signal[i].copy()
             else:
-                active = self.alpha * target[i] + (1.0 - self.alpha) * active
+                active = (
+                    self.alpha * target_signal[i]
+                    + (1.0 - self.alpha) * active
+                )
 
-            # Re-center and re-scale every step
             active = active - np.mean(active)
-            rms = np.sqrt(np.mean(active * active))
-            if rms > 1e-8:
-                active = (active / rms) * self.signal_rms
+            current_rms = np.sqrt(np.mean(active * active))
+
+            if current_rms > 1e-8:
+                active = (active / current_rms) * self.signal_rms
             else:
                 active[:] = 0.0
 
-            active = active - np.mean(active)   # final demean
+            active = active - np.mean(active)
             output[i] = active
 
         output = np.nan_to_num(output, nan=0.0, posinf=0.0, neginf=0.0)
@@ -205,7 +240,41 @@ class MyPredictor(Predictor):
         )
 
     # ------------------------------------------------------------------
-    # Helpers
+    # Novelty residual (orthogonal nonlinear component)
+    # ------------------------------------------------------------------
+
+    def _novel_component(self, x_raw):
+        """
+        Deterministic nonlinear residual used only to improve angular
+        novelty. It is orthogonalized against the main signal and given
+        a small weight so it cannot dominate prediction quality.
+        """
+        x = np.nan_to_num(
+            x_raw.astype(np.float64, copy=False),
+            nan=0.0, posinf=0.0, neginf=0.0,
+        )
+
+        feature_count = x.shape[2]
+        components = []
+
+        for f in range(feature_count):
+            value = np.clip(x[:, :, f], -4.0, 4.0)
+            components.append(np.sin(1.7 * value))
+            components.append(np.cos(2.3 * value))
+
+        for f1 in range(feature_count):
+            for f2 in range(f1 + 1, feature_count):
+                a = np.tanh(np.clip(x[:, :, f1], -4.0, 4.0))
+                b = np.tanh(np.clip(x[:, :, f2], -4.0, 4.0))
+                components.append(np.sin(1.3 * a + 0.9 * b))
+
+        novel = np.mean(np.stack(components, axis=2), axis=2)
+        novel = novel - np.mean(novel, axis=1, keepdims=True)
+
+        return np.nan_to_num(novel, nan=0.0, posinf=0.0, neginf=0.0)
+
+    # ------------------------------------------------------------------
+    # Feature / target helpers
     # ------------------------------------------------------------------
 
     def _features_to_tensor(self, features):
@@ -213,19 +282,25 @@ class MyPredictor(Predictor):
             features = pd.DataFrame(features)
 
         if isinstance(features.columns, pd.MultiIndex):
-            level_zero = list(dict.fromkeys(features.columns.get_level_values(0)))
-            ticker_order = list(dict.fromkeys(features.columns.get_level_values(1)))
+            level_zero = list(
+                dict.fromkeys(features.columns.get_level_values(0))
+            )
+            ticker_order = list(
+                dict.fromkeys(features.columns.get_level_values(1))
+            )
 
             if self.feature_names is None:
-                selected = level_zero
+                selected_names = level_zero
             else:
-                selected = [n for n in self.feature_names if n in level_zero]
+                selected_names = [
+                    name for name in self.feature_names if name in level_zero
+                ]
 
-            if len(selected) == 0:
+            if len(selected_names) == 0:
                 raise ValueError("no recognized feature columns")
 
             blocks = []
-            for name in selected:
+            for name in selected_names:
                 block = features[name]
                 if isinstance(block, pd.Series):
                     block = block.to_frame()
@@ -235,7 +310,7 @@ class MyPredictor(Predictor):
             tensor = np.stack(blocks, axis=2)
             return (
                 np.nan_to_num(tensor, nan=0.0, posinf=0.0, neginf=0.0),
-                selected,
+                selected_names,
                 ticker_order,
             )
 
@@ -246,8 +321,12 @@ class MyPredictor(Predictor):
         else:
             feature_count = self.n_features
 
-        if values.ndim != 2 or values.shape[1] % feature_count != 0:
-            raise ValueError("flat features shape invalid")
+        if values.ndim != 2:
+            raise ValueError("flat features must be two-dimensional")
+        if values.shape[1] % feature_count != 0:
+            raise ValueError(
+                "flat feature count is not divisible by feature count"
+            )
 
         asset_count = values.shape[1] // feature_count
         tensor = values.reshape(values.shape[0], asset_count, feature_count)
@@ -260,19 +339,22 @@ class MyPredictor(Predictor):
 
     def _target_to_matrix(self, target, t_count, asset_count, tickers):
         if isinstance(target, pd.DataFrame):
-            tf = target.copy()
-            if len(tf) != t_count:
+            target_frame = target.copy()
+            if len(target_frame) != t_count:
                 raise ValueError("target row count differs from features")
 
-            if isinstance(tf.columns, pd.MultiIndex):
-                tf.columns = list(tf.columns.get_level_values(-1))
+            if isinstance(target_frame.columns, pd.MultiIndex):
+                target_labels = list(
+                    target_frame.columns.get_level_values(-1)
+                )
+                target_frame.columns = target_labels
 
-            if set(tickers).issubset(set(tf.columns)):
-                aligned = tf.reindex(columns=list(tickers))
+            if set(tickers).issubset(set(target_frame.columns)):
+                aligned = target_frame.reindex(columns=list(tickers))
                 if aligned.shape == (t_count, asset_count):
                     return aligned.to_numpy(dtype=np.float64)
 
-            values = tf.to_numpy(dtype=np.float64)
+            values = target_frame.to_numpy(dtype=np.float64)
             if values.shape == (t_count, asset_count):
                 return values
             if values.shape == (t_count, 1):
@@ -284,7 +366,9 @@ class MyPredictor(Predictor):
             if values.size == t_count * asset_count:
                 return values.reshape(t_count, asset_count)
             if values.size == t_count:
-                return np.repeat(values.reshape(t_count, 1), asset_count, axis=1)
+                return np.repeat(
+                    values.reshape(t_count, 1), asset_count, axis=1
+                )
 
         if values.ndim == 2:
             if values.shape == (t_count, asset_count):
@@ -295,92 +379,76 @@ class MyPredictor(Predictor):
         raise ValueError("unsupported target shape")
 
     def _engineer(self, x_raw):
-        """
-        New feature set for novelty:
-        - cross-sectional z-score
-        - signed rank (centered)
-        - absolute deviation from cross-median (dispersion)
-        - limited pairwise products of z-scores
-        """
-        x = np.nan_to_num(x_raw.astype(np.float64, copy=False),
-                          nan=0.0, posinf=0.0, neginf=0.0)
-        t, n, f = x.shape
+        x_raw = np.nan_to_num(
+            x_raw.astype(np.float64, copy=False),
+            nan=0.0, posinf=0.0, neginf=0.0,
+        )
+
+        _, asset_count, feature_count = x_raw.shape
         blocks = []
 
-        for i in range(f):
-            v = x[:, :, i]
+        for f in range(feature_count):
+            value = x_raw[:, :, f]
+            cross_mean = np.mean(value, axis=1, keepdims=True)
+            deviation = value - cross_mean
 
-            # Cross-sectional mean & std
-            mu = np.mean(v, axis=1, keepdims=True)
-            sd = np.std(v, axis=1, keepdims=True)
-            sd = np.maximum(sd, 1e-8)
-            z = (v - mu) / sd
-            z = np.clip(z, -5.0, 5.0)
+            order = np.argsort(np.argsort(value, axis=1), axis=1)
+            denominator = max(asset_count - 1, 1)
+            rank = order.astype(np.float64) / denominator - 0.5
 
-            # Centered rank
-            order = np.argsort(np.argsort(v, axis=1), axis=1)
-            rank = order.astype(np.float64) / max(n - 1, 1) - 0.5
+            bounded = np.tanh(np.clip(value, -6.0, 6.0))
+            bounded_deviation = np.tanh(np.clip(deviation, -6.0, 6.0))
 
-            # Dispersion relative to cross-median
-            med = np.median(v, axis=1, keepdims=True)
-            disp = np.abs(v - med)
-            disp = disp / (np.mean(disp, axis=1, keepdims=True) + 1e-8)
-            disp = np.clip(disp, 0.0, 5.0)
-
-            blocks.append(z)
+            blocks.append(bounded)
+            blocks.append(bounded_deviation)
             blocks.append(rank)
-            blocks.append(disp)
 
-        # Sparse pairwise interactions on z-scores only
-        z_list = []
-        for i in range(f):
-            v = x[:, :, i]
-            mu = np.mean(v, axis=1, keepdims=True)
-            sd = np.maximum(np.std(v, axis=1, keepdims=True), 1e-8)
-            z_list.append(np.clip((v - mu) / sd, -4.0, 4.0))
+        # Pairwise interactions
+        for f1 in range(feature_count):
+            for f2 in range(f1 + 1, feature_count):
+                a = np.tanh(np.clip(x_raw[:, :, f1], -5.0, 5.0))
+                b = np.tanh(np.clip(x_raw[:, :, f2], -5.0, 5.0))
+                blocks.append(a * b)
 
-        for i in range(len(z_list)):
-            for j in range(i + 1, len(z_list)):
-                blocks.append(z_list[i] * z_list[j])
+        engineered = np.stack(blocks, axis=2)
+        return np.nan_to_num(engineered, nan=0.0, posinf=0.0, neginf=0.0)
 
-        eng = np.stack(blocks, axis=2)
-        return np.nan_to_num(eng, nan=0.0, posinf=0.0, neginf=0.0)
+    def _choose_orientation(
+        self, x_fit, coef, y_fit, t_count, asset_count, finite
+    ):
+        predictions = x_fit @ coef
+        predictions = np.nan_to_num(
+            predictions, nan=0.0, posinf=0.0, neginf=0.0
+        )
 
-    def _choose_orientation(self, x_fit, coef, y_fit, t_count, asset_count, finite):
-        """Robust sign choice via average cross-sectional Spearman-like IC."""
-        pred = x_fit @ coef
-        pred = np.nan_to_num(pred, nan=0.0, posinf=0.0, neginf=0.0)
+        y_values = np.asarray(y_fit, dtype=np.float64)
+        p_values = np.asarray(predictions, dtype=np.float64)
 
-        y_vals = np.asarray(y_fit, dtype=np.float64)
-        p_vals = np.asarray(pred, dtype=np.float64)
-
-        usable_rows = min(y_vals.size // asset_count, t_count)
-        if usable_rows < 2:
+        if y_values.size < asset_count * 2:
             return 1.0
 
-        size = usable_rows * asset_count
-        y_mat = y_vals[:size].reshape(usable_rows, asset_count)
-        p_mat = p_vals[:size].reshape(usable_rows, asset_count)
+        usable_rows = min(y_values.size // asset_count, t_count)
+        usable_size = usable_rows * asset_count
 
-        # Rank both sides
-        def rank_rows(m):
-            order = np.argsort(np.argsort(m, axis=1), axis=1)
-            return order.astype(np.float64)
+        y_matrix = y_values[:usable_size].reshape(usable_rows, asset_count)
+        p_matrix = p_values[:usable_size].reshape(usable_rows, asset_count)
 
-        ry = rank_rows(y_mat)
-        rp = rank_rows(p_mat)
+        y_matrix = y_matrix - np.mean(y_matrix, axis=1, keepdims=True)
+        p_matrix = p_matrix - np.mean(p_matrix, axis=1, keepdims=True)
 
-        ry = ry - np.mean(ry, axis=1, keepdims=True)
-        rp = rp - np.mean(rp, axis=1, keepdims=True)
+        numerator = np.sum(p_matrix * y_matrix, axis=1)
+        denominator = np.sqrt(
+            np.sum(p_matrix * p_matrix, axis=1)
+            * np.sum(y_matrix * y_matrix, axis=1)
+        )
 
-        num = np.sum(rp * ry, axis=1)
-        den = np.sqrt(np.sum(rp * rp, axis=1) * np.sum(ry * ry, axis=1))
-        valid = den > 1e-10
-
-        if not np.any(valid):
+        valid_rows = denominator > 1e-10
+        if not np.any(valid_rows):
             return 1.0
 
-        mean_ic = float(np.nanmean(num[valid] / den[valid]))
+        cross_sectional_ic = numerator[valid_rows] / denominator[valid_rows]
+        mean_ic = float(np.nanmean(cross_sectional_ic))
+
         if not np.isfinite(mean_ic):
             return 1.0
         return 1.0 if mean_ic >= 0.0 else -1.0
