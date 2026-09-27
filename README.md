@@ -1,6 +1,10 @@
 # Hello everyone, this is MD ABUL HOSSAIN (AnticipatedD)
-
-**SVP & Head of Strategic Partnerships at TARU Global Access | IBM Business Partner Plus | EU F&T Expert EX2026D1473148 | AlphaNova Tech Global Leaderboard Rank #28 Individual Rank 57/873 | Web of Science ResearcherID: QQZ-6739-2026 | ORCiD: 0009-0004-4378-5298**
+![European F&T](https://img.shields.io/badge/European_F%26T-Community_Member-1B4F72?style=flat-square&logo=europeanunion&logoColor=white)
+![F&T Excellence](https://img.shields.io/badge/F%26T-Excellence_Award-2E86AB?style=flat-square)
+![IBM Achievements](https://img.shields.io/badge/IBM-Certified_Achievements-054ADA?style=flat-square&logo=ibm&logoColor=white)
+![IBM Partner Plus](https://img.shields.io/badge/IBM-Partner_Plus-0F62FE?style=flat-square&logo=ibm&logoColor=white) 
+![Microsoft Learn Profile](https://img.shields.io/badge/Microsoft_Learn-170_Badges_%7C_34_Trophies_%7C_Level_12-0078D4?style=flat-square&logo=microsoft&logoColor=white)
+![Official Partner](https://img.shields.io/badge/Official-Microsoft_Business_Partner-00BCF2?style=flat-square&logo=microsoft&logoColor=white)
 
 ### 📚 Academic Citation & Verified DOI
 This framework is officially registered and archived with the European Union open-access infrastructure: 
