@@ -2,7 +2,7 @@
 ![G4LA13_Research_Paper](AnticipatedD_G4LA13_Team_project3.jpg)
 
 **Project Architect:** MD ABUL HOSSAIN (AnticipatedD G4LA13 Team)  
-**Kaggle Profile:** [harigov63](https://kaggle.com/harigov63) 
+**Kaggle Profile:** [harigov63](https://kaggle.com/harigov63)  
 **Contact:** harigov63@gmail.com  
 **Submission Repository Path:** `harigov63/G4LA13_Research_Paper/`
 
