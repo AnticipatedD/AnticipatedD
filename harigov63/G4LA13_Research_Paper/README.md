@@ -1,4 +1,5 @@
 # 📦 G4LA13: Localizing Gemma 4 as a Code-Graph Guided Autonomous Software Agent
+![G4LA13_Research_Paper](AnticipatedD_G4LA13_Team_project3.jpg)
 
 **Project Architect:** MD ABUL HOSSAIN (AnticipatedD G4LA13 Team)  
 **Kaggle Profile:** [harigov63](https://kaggle.com/harigov63) 
