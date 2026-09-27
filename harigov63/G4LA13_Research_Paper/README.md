@@ -6,6 +6,8 @@
 **Contact:** harigov63@gmail.com  
 **Submission Repository Path:** `harigov63/G4LA13_Research_Paper/`
 
+This repository contains the complete implementation codebase and configuration profiles for G4LA13, an autonomous, local software engineering agent powered by a post-trained `gemma-4-31b-it-qat-a4b16-ct` architecture.
+
 ---
 
 ## 🛠️ How It Works (Step-by-Step Pipeline)
@@ -16,6 +18,20 @@ Unlike traditional coding agents that blindly ingest raw source files, G4LA13 im
 2. **Induced Subgraph Generation:** The agent traverses adjacent code blocks using `sg.get_neighbor` to extract callers, dependencies, and type hierarchies, dynamically creating a high-density structural context window.
 3. **Isolated Reasoning & Plan Generation:** The compiled context and issue guidelines are passed down to our local quantized model via a vLLM wrapper. The model engages its internal reasoning framework within a locked **4,096-token thinking budget**, testing edge-cases internally before generating structural tool commands.
 4. **Patch Verification and Output:** The agent crafts a targeted file modification string, applies the patch locally, and runs syntax validation routines before submitting the changes to the evaluation framework.
+
+[Issue Text Input] 
+      │
+      ▼
+1. Semantic Retrieval ──► sg.get_similar_nodes() ──► Extracts Top-K Concept Anchor Nodes
+    │
+    ▼
+2. Context Compaction ──► sg.get_neighbor()      ──► Builds Compact Induced Subgraph
+    │
+    ▼
+3. Reasoning Phase    ──► vLLM Sandbox (4096 Pad) ──► Multi-Turn Hidden Chain-of-Thought
+    │
+    ▼
+4. Synthesis Phase    ──► Local Code Execution   ──► Validates and Writes Strict Git Patch
 
 ---
 
