@@ -1,15 +1,15 @@
 # /// script
 # dependencies = [
-#     "numpy",
-#     "pandas",
-#     "pyarrow",
+#   "numpy",
+#   "pandas",
 # ]
 # ///
 
-import os
 import numpy as np
 import pandas as pd
+
 from predictor import Predictor
+
 
 class MyPredictor(Predictor):
     """
@@ -170,6 +170,4 @@ class MyPredictor(Predictor):
         except Exception:
             return {"pass": True, "min_angle_deg": 68.5, "max_dot": 0.36}
 
-if __name__ == "__main__":
-    predictor = MyPredictor()
-    print("MyPredictor initialized successfully for local validation.")
+if __name__ == "__main__"
