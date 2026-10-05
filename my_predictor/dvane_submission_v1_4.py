@@ -11,9 +11,8 @@ from predictor import Predictor
 
 class MyPredictor(Predictor):
     """
-    Asymmetric Rank-Difference & Product Engine.
-    Deliberately avoids the crowded equal-weight rank + tanh region
-    to push City / Global novelty higher.
+    Rank-Difference baseline with correct concentration control.
+    Scaling is applied AFTER the EMA so concentration stays in the healthy band.
     """
 
     def __init__(self):
@@ -22,8 +21,8 @@ class MyPredictor(Predictor):
         self.prev_signal = None
         self.prev_tickers = None
 
-        self.target_concentration = 0.23
-        self.ema_alpha = 0.20
+        self.ema_alpha = 0.22
+        self.target_concentration = 0.23   # healthy target
 
     def train(self, features: pd.DataFrame, target=None) -> None:
         if features is not None and not features.empty:
@@ -39,7 +38,7 @@ class MyPredictor(Predictor):
 
         if (
             features is None
-            or features.empty
+            or len(features) == 0
             or self.feature_names is None
             or len(self.feature_names) < 6
         ):
@@ -56,32 +55,19 @@ class MyPredictor(Predictor):
 
             T, J = f[0].shape
 
-            # 2. Asymmetric difference + product basis (far from equal-weight ranks)
-            #    This is the novelty driver
-            s = np.zeros((T, J), dtype=np.float64)
-
-            # Strong differences (creates a different polarity)
-            s += 1.00 * (f[0] - f[3])
-            s += 0.70 * (f[1] - f[4])
-            s += 0.50 * (f[2] - f[5])
-
-            # Selected asymmetric products
-            s += 0.40 * (f[0] * np.abs(f[5]))
-            s += 0.35 * (f[1] * f[2])
-            s += 0.30 * (np.sign(f[3]) * f[4] * f[5])
-
-            # One higher-order term
-            s += 0.25 * (f[0] * f[1] - f[2] * f[3])
+            # 2. Asymmetric combination (not plain average → better novelty)
+            signal = (
+                1.00 * (f[0] - f[3]) +
+                0.75 * (f[1] - f[4]) +
+                0.50 * (f[2] - f[5]) +
+                0.35 * (f[0] * np.abs(f[5])) +
+                0.25 * (f[1] * f[2])
+            )
 
             # 3. Demean
-            s -= s.mean(axis=1, keepdims=True)
+            signal = signal - signal.mean(axis=1, keepdims=True)
 
-            # 4. Scale to target concentration
-            norms = np.linalg.norm(s, axis=1, keepdims=True)
-            norms = np.maximum(norms, 1e-10)
-            signal = s / norms * self.target_concentration
-
-            # 5. Light causal EMA (turnover control)
+            # 4. Light causal EMA
             out = np.zeros_like(signal)
 
             if (
@@ -96,11 +82,19 @@ class MyPredictor(Predictor):
 
             for t in range(T):
                 active = self.ema_alpha * signal[t] + (1.0 - self.ema_alpha) * active
-                active -= active.mean()
+                active = active - active.mean()
                 out[t] = active
 
-            # 6. Final demean
-            out -= out.mean(axis=1, keepdims=True)
+            # 5. Final demean
+            out = out - out.mean(axis=1, keepdims=True)
+
+            # 6. CRITICAL: Scale to target concentration AFTER EMA
+            norms = np.linalg.norm(out, axis=1, keepdims=True)
+            norms = np.maximum(norms, 1e-10)
+            out = out / norms * self.target_concentration
+
+            # 7. One last demean (platform safety)
+            out = out - out.mean(axis=1, keepdims=True)
             out = np.nan_to_num(out, nan=0.0)
 
             self.prev_signal = out[-1].copy()
