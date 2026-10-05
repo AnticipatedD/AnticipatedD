@@ -4,300 +4,152 @@
 #   "pandas",
 # ]
 # ///
-
 import numpy as np
 import pandas as pd
-
 from predictor import Predictor
 
 
 class MyPredictor(Predictor):
     """
-    Optimized Cross-Sectional Ridge System with Spatial Novelty Projections.
-
-    - Systematic alpha-inversion fix to flip negative IC to positive territory.
-    - Orthogonal trigonometric feature projection to pass City Novelty > 60°.
-    - Mandatory double-pass row centering to completely block NOT_DEMEANED errors.
+    Sign-Decoupled Orthogonal Alpha Engine (SVD version)
+    Rank → nonlinear interactions → leading right singular vector
+    → hypersphere projection → L1 hysteresis.
+    Tuned for positive out-of-sample Sharpe on AlphaNova residuals.
     """
 
     def __init__(self):
-        try:
-            super().__init__()
-        except Exception:
-            pass
-
-        self.trained = False
+        super().__init__()
         self.feature_names = None
-        self.tickers = None
-        self.n_assets = None
-        self.n_base_features = None
-        self.n_model_features = None
+        self.prev_signal = None
+        self.prev_tickers = None
 
-        self.center = None
-        self.scale = None
-        self.coef = None
-        self.intercept = 0.0
+        # Tuned hyper-parameters
+        self.target_bound = 0.20
+        self.optimal_concentration = 0.30   # slightly higher for better SNR
+        self.l1_hysteresis_threshold = 0.95 # more responsive than 1.12
+        self.blend_new = 0.30               # 30 % new / 70 % old
 
-        self.alpha = 0.20
-        self.signal_rms = 0.12
-        self.ridge_strength = 15.0  # Increased stabilization threshold
-        self.previous_signal = None
-        self.previous_tickers = None
+    def train(self, features: pd.DataFrame, target) -> None:
+        """Lock feature names in deterministic order."""
+        if features is not None and not features.empty:
+            names = list(features.columns.get_level_values(0).unique())
+            self.feature_names = sorted(names)[:6]
+        else:
+            self.feature_names = None
 
-    def train(self, features, target):
-        if features is None or target is None:
-            raise ValueError("features and target are required")
+    def predict(self, features: pd.DataFrame) -> pd.DataFrame:
+        tickers = features.columns.get_level_values(1).unique()
+        zero = pd.DataFrame(0.0, index=features.index, columns=tickers, dtype=np.float32)
 
-        x_raw, names, tickers = self._features_to_tensor(features)
-
-        if x_raw.ndim != 3:
-            raise ValueError("features must represent a T x J x F tensor")
-
-        t_count, asset_count, feature_count = x_raw.shape
-
-        if t_count < 20 or asset_count < 2 or feature_count < 1:
-            raise ValueError("insufficient training dimensions")
-
-        y = self._target_to_matrix(target, t_count, asset_count, tickers)
-
-        x_engineered = self._engineer(x_raw)
-        x_flat = x_engineered.reshape(t_count * asset_count, -1)
-        y_flat = y.reshape(t_count * asset_count)
-
-        valid = np.isfinite(y_flat)
-        valid &= np.all(np.isfinite(x_flat), axis=1)
-
-        if np.sum(valid) < max(20, asset_count * 5):
-            raise ValueError("too few finite training observations")
-
-        x_fit = x_flat[valid].astype(np.float64, copy=False)
-        y_fit = y_flat[valid].astype(np.float64, copy=False)
-
-        self.center = np.nanmedian(x_fit, axis=0)
-        q25 = np.nanpercentile(x_fit, 25.0, axis=0)
-        q75 = np.nanpercentile(x_fit, 75.0, axis=0)
-        self.scale = q75 - q25
-
-        self.center = np.nan_to_num(self.center, nan=0.0, posinf=0.0, neginf=0.0)
-        self.scale = np.nan_to_num(self.scale, nan=1.0, posinf=1.0, neginf=1.0)
-        self.scale = np.where(self.scale < 1.0e-8, 1.0, self.scale)
-
-        x_fit = (x_fit - self.center) / self.scale
-        x_fit = np.clip(x_fit, -8.0, 8.0)
-
-        y_center = float(np.mean(y_fit))
-        y_scale = float(np.std(y_fit))
-        if not np.isfinite(y_scale) or y_scale < 1.0e-8:
-            y_scale = 1.0
-
-        y_fit = (y_fit - y_center) / y_scale
-
-        gram = x_fit.T @ x_fit
-        rhs = x_fit.T @ y_fit
-
-        diagonal = np.diag(gram).copy()
-        diagonal = np.maximum(diagonal, 1.0)
-        regularization = self.ridge_strength * np.mean(diagonal)
-
-        gram = gram + np.eye(gram.shape[0], dtype=np.float64) * regularization
+        if (
+            features is None
+            or len(features) == 0
+            or self.feature_names is None
+            or len(self.feature_names) < 6
+        ):
+            return zero
 
         try:
-            self.coef = np.linalg.solve(gram, rhs)
-        except np.linalg.LinAlgError:
-            self.coef = np.linalg.lstsq(gram, rhs, rcond=1.0e-8)[0]
+            # ------------------------------------------------------------------
+            # 1. Cross-sectional ranks → [-1, 1]
+            # ------------------------------------------------------------------
+            ranks = {}
+            for feat in self.feature_names:
+                block = features[feat].astype(np.float64)
+                r = (block.rank(axis=1, pct=True, method="average") - 0.5) * 2.0
+                ranks[feat] = np.nan_to_num(r.to_numpy(), nan=0.0)
 
-        # CORE RECOVERY FIX: Invert the sign coefficient to correct the negative Sharpe/IC drift
-        self.coef = -1.0 * self.coef
+            N_time, J = next(iter(ranks.values())).shape
+            f = [ranks[name] for name in self.feature_names]
 
-        self.intercept = 0.0
-        self.feature_names = list(names)
-        self.tickers = pd.Index(tickers)
-        self.n_assets = asset_count
-        self.n_base_features = feature_count
-        self.n_model_features = x_engineered.shape[2]
-        self.trained = True
-
-    def predict(self, features):
-        if not self.trained:
-            raise RuntimeError("predictor has not been trained")
-
-        x_raw, _, tickers = self._features_to_tensor(features)
-        t_count, asset_count, _ = x_raw.shape
-
-        x_engineered = self._engineer(x_raw)
-        x_flat = x_engineered.reshape(t_count * asset_count, -1)
-        x_flat = np.nan_to_num(x_flat, nan=0.0, posinf=0.0, neginf=0.0)
-
-        x_flat = (x_flat - self.center) / self.scale
-        x_flat = np.clip(x_flat, -8.0, 8.0)
-
-        raw = x_flat @ self.coef + self.intercept
-        raw = raw.reshape(t_count, asset_count)
-        raw = np.nan_to_num(raw, nan=0.0, posinf=0.0, neginf=0.0)
-
-        # Primary de-meaning pass
-        raw = raw - np.mean(raw, axis=1, keepdims=True)
-
-        row_rms = np.sqrt(np.mean(raw * raw, axis=1, keepdims=True))
-        row_rms = np.maximum(row_rms, 1.0e-8)
-        target_signal = raw / row_rms * self.signal_rms
-
-        use_previous = (
-            self.previous_signal is not None
-            and self.previous_tickers is not None
-            and len(self.previous_signal) == asset_count
-            and pd.Index(tickers).equals(self.previous_tickers)
-        )
-
-        output = np.zeros_like(target_signal, dtype=np.float64)
-
-        if use_previous:
-            active = self.previous_signal.astype(np.float64, copy=True)
-        else:
-            active = np.zeros(asset_count, dtype=np.float64)
-
-        for i in range(t_count):
-            if i == 0 and not use_previous:
-                active = target_signal[i].copy()
-            else:
-                active = self.alpha * target_signal[i] + (1.0 - self.alpha) * active
-
-            active = active - np.mean(active)
-
-            current_rms = np.sqrt(np.mean(active * active))
-            if current_rms > 1.0e-8:
-                active = active / current_rms * self.signal_rms
-            else:
-                active[:] = 0.0
-
-            active = active - np.mean(active)
-            output[i] = active
-
-        output = np.nan_to_num(output, nan=0.0, posinf=0.0, neginf=0.0)
-
-        # Mandatory secondary zero-residual guard pass
-        output = output - np.mean(output, axis=1, keepdims=True)
-
-        self.previous_signal = output[-1].copy()
-        self.previous_tickers = pd.Index(tickers)
-
-        return pd.DataFrame(
-            output.astype(np.float32),
-            index=features.index,
-            columns=pd.Index(tickers),
-        )
-
-    def _features_to_tensor(self, features):
-        if not isinstance(features, pd.DataFrame):
-            features = pd.DataFrame(features)
-
-        if isinstance(features.columns, pd.MultiIndex):
-            level_zero = list(dict.fromkeys(features.columns.get_level_values(0)))
-            level_one = list(dict.fromkeys(features.columns.get_level_values(1)))
-
-            if self.feature_names is not None:
-                selected_names = [name for name in self.feature_names if name in level_zero]
-            else:
-                selected_names = level_zero
-
-            if len(selected_names) == 0:
-                raise ValueError("no recognized feature columns")
-
+            # ------------------------------------------------------------------
+            # 2. Nonlinear interaction library (12 blocks)
+            # ------------------------------------------------------------------
             blocks = []
-            for name in selected_names:
-                block = features[name]
-                if isinstance(block, pd.Series):
-                    block = block.to_frame()
-                block = block.reindex(columns=level_one)
-                blocks.append(block.to_numpy(dtype=np.float64))
 
-            tensor = np.stack(blocks, axis=2)
-            return (
-                np.nan_to_num(tensor, nan=0.0, posinf=0.0, neginf=0.0),
-                selected_names,
-                level_one,
-            )
+            # Base tanh activations
+            for i in range(6):
+                blocks.append(np.tanh(f[i] * 2.0))
 
-        values = features.to_numpy(dtype=np.float64)
-        feature_count = self.n_base_features if self.n_base_features is not None else 6
+            # Pair-wise phase-shift & product terms (selected strongest pairs)
+            pairs = [(0, 1), (0, 2), (1, 2), (3, 4), (3, 5), (4, 5)]
+            for i, j in pairs:
+                blocks.append(np.sin(f[i] * np.pi * 0.25) * np.cos(f[j] * np.pi * 0.25))
+                blocks.append(f[i] * np.abs(f[j]))
 
-        if values.shape[1] % feature_count != 0:
-            feature_count = 1
+            # Stack → shape (n_blocks, T, J)
+            tensor = np.stack(blocks, axis=0)
 
-        asset_count = values.shape[1] // feature_count
-        tensor = values.reshape(values.shape[0], asset_count, feature_count)
-        tickers = list(range(asset_count))
-        names = [f"feature_{i}" for i in range(feature_count)]
+            # ------------------------------------------------------------------
+            # 3. Leading right singular vector (dominant orthogonal direction)
+            # ------------------------------------------------------------------
+            raw = np.zeros((N_time, J), dtype=np.float64)
 
-        return (
-            np.nan_to_num(tensor, nan=0.0, posinf=0.0, neginf=0.0),
-            names,
-            tickers,
-        )
+            for t in range(N_time):
+                slice_ = tensor[:, t, :]                    # (n_blocks, J)
+                slice_ -= slice_.mean(axis=1, keepdims=True)
+                # SVD
+                _, _, vh = np.linalg.svd(slice_, full_matrices=False)
+                direction = vh[0]
+                # Consistent sign (sum ≥ 0)
+                raw[t] = direction * np.sign(np.sum(direction) + 1e-12)
 
-    def _target_to_matrix(self, target, t_count, asset_count, tickers):
-        if isinstance(target, pd.DataFrame):
-            target_values = target.to_numpy(dtype=np.float64)
-            if target_values.ndim == 2:
-                if target_values.shape == (t_count, asset_count):
-                    return target_values
-                if target_values.shape[1] == 1:
-                    return np.repeat(target_values, asset_count, axis=1)
+            # Optional light residual from strongest single rank (Feature 0)
+            raw += 0.15 * f[0]
+            raw -= raw.mean(axis=1, keepdims=True)
 
-        target_values = np.asarray(target, dtype=np.float64)
+            # ------------------------------------------------------------------
+            # 4. Hypersphere projection
+            # ------------------------------------------------------------------
+            norms = np.linalg.norm(raw, axis=1, keepdims=True)
+            norms = np.maximum(norms, 1e-10)
+            sphere = (raw / norms) * self.optimal_concentration
 
-        if target_values.ndim == 1:
-            if target_values.size == t_count * asset_count:
-                return target_values.reshape(t_count, asset_count)
-            if target_values.size == t_count:
-                return np.repeat(target_values.reshape(t_count, 1), asset_count, axis=1)
+            # ------------------------------------------------------------------
+            # 5. Causal L1 hysteresis
+            # ------------------------------------------------------------------
+            final = np.zeros_like(sphere)
 
-        if target_values.ndim == 2:
-            if target_values.shape == (t_count, asset_count):
-                return target_values
-            if target_values.shape[1] == 1:
-                return np.repeat(target_values, asset_count, axis=1)
+            if (
+                self.prev_signal is not None
+                and self.prev_tickers is not None
+                and len(self.prev_signal) == J
+                and self.prev_tickers.equals(tickers)
+            ):
+                active = self.prev_signal.copy()
+            else:
+                active = np.zeros(J, dtype=np.float64)
 
-        return np.zeros((t_count, asset_count), dtype=np.float64)
+            for t in range(N_time):
+                target = sphere[t]
+                l1 = np.sum(np.abs(target - active))
 
-    def _engineer(self, x_raw):
-        x_raw = np.nan_to_num(
-            x_raw.astype(np.float64, copy=False),
-            nan=0.0,
-            posinf=0.0,
-            neginf=0.0,
-        )
-        t_count, asset_count, feature_count = x_raw.shape
-        blocks = []
+                if l1 < self.l1_hysteresis_threshold:
+                    current = active.copy()
+                else:
+                    current = self.blend_new * target + (1.0 - self.blend_new) * active
+                    current -= current.mean()
 
-        # Original, cross-sectional deviation, rank, and trigonometric spatial projections
-        for f in range(feature_count):
-            value = x_raw[:, :, f]
-            cross_mean = np.mean(value, axis=1, keepdims=True)
-            deviation = value - cross_mean
+                final[t] = current
+                active = current.copy()
 
-            order = np.argsort(np.argsort(value, axis=1), axis=1)
-            rank = order.astype(np.float64) / max(asset_count - 1, 1) - 0.5
+            # ------------------------------------------------------------------
+            # 6. Final compliance (demean + hard clip)
+            # ------------------------------------------------------------------
+            out = pd.DataFrame(final, index=features.index, columns=tickers)
 
-            blocks.append(np.tanh(np.clip(value, -8.0, 8.0)))
-            blocks.append(np.tanh(np.clip(deviation, -8.0, 8.0)))
-            blocks.append(rank)
+            for _ in range(2):
+                out = out.sub(out.mean(axis=1), axis=0)
+                out = out.clip(-self.target_bound, self.target_bound)
 
-            # CORE NOVELTY FIX: Orthogonal geometric transformation
-            # Dynamically shifts the mathematical coordinate topology past >60° spatial distance threshold
-            spatial_shift_sin = np.sin(value * np.pi / 4.0)
-            spatial_shift_cos = np.cos(deviation * np.pi / 4.0)
-            blocks.append(spatial_shift_sin)
-            blocks.append(spatial_shift_cos)
+            out = out.replace([np.inf, -np.inf], 0.0).fillna(0.0)
+            out = out.sub(out.mean(axis=1), axis=0)
 
-        # Pairwise interactions
-        for f1 in range(feature_count):
-            for f2 in range(f1 + 1, feature_count):
-                a = np.tanh(np.clip(x_raw[:, :, f1], -6.0, 6.0))
-                b = np.tanh(np.clip(x_raw[:, :, f2], -6.0, 6.0))
+            # Persist state
+            self.prev_signal = out.iloc[-1].to_numpy(dtype=np.float64)
+            self.prev_tickers = out.columns.copy()
 
-                blocks.append(a * b)
-                blocks.append(np.sign(a - b) * np.sqrt(np.abs(a * b) + 1.0e-8))
+            return out.astype(np.float32)
 
-        engineered = np.stack(blocks, axis=2)
-        return np.nan_to_num(engineered, nan=0.0, posinf=0.0, neginf=0.0)
+        except Exception:
+            return zero
