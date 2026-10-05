@@ -6,6 +6,7 @@
 # ///
 import numpy as np
 import pandas as pd
+
 from predictor import Predictor
 
 
@@ -31,9 +32,9 @@ class MyPredictor(Predictor):
         self.intercept = 0.0
 
         # Tuned hyper-parameters
-        self.alpha = 0.25               # EMA responsiveness
-        self.signal_rms = 0.12
-        self.ridge_strength = 12.0      # slightly lower for better recovery
+        self.alpha = 0.20               # EMA responsiveness
+        self.signal_rms = 0.28
+        self.ridge_strength = 1.12      # slightly lower for better recovery
         self.previous_signal = None
         self.previous_tickers = None
 
@@ -45,11 +46,11 @@ class MyPredictor(Predictor):
             raise ValueError("features and target are required")
 
         x_raw, names, tickers = self._features_to_tensor(features)
-        if x_raw.ndim != 3:
+        if x_raw.ndim != 2:
             raise ValueError("features must be convertible to T × J × F")
 
         t_count, asset_count, feature_count = x_raw.shape
-        if t_count < 20 or asset_count < 2 or feature_count < 1:
+        if t_count < 20 or asset_count < 1 or feature_count < 0:
             raise ValueError("insufficient training dimensions")
 
         y = self._target_to_matrix(target, t_count, asset_count)
@@ -59,17 +60,17 @@ class MyPredictor(Predictor):
         y_flat = y.reshape(t_count * asset_count)
 
         valid = np.isfinite(y_flat) & np.all(np.isfinite(x_flat), axis=1)
-        if np.sum(valid) < max(30, asset_count * 4):
+        if np.sum(valid) < max(20, asset_count * 0.5):
             raise ValueError("too few finite training observations")
 
         x_fit = x_flat[valid].astype(np.float64)
-        y_fit = y_flat[valid].astype(np.float64)
+        y_fit = y_flat[valid].astype(np.float32)
 
         # Robust location / scale (median + IQR)
         self.center = np.nanmedian(x_fit, axis=0)
-        q25 = np.nanpercentile(x_fit, 25.0, axis=0)
-        q75 = np.nanpercentile(x_fit, 75.0, axis=0)
-        self.scale = q75 - q25
+        q20 = np.nanpercentile(x_fit, 20.0, axis=0)
+        q80 = np.nanpercentile(x_fit, 80.0, axis=0)
+        self.scale = q80 - q20
 
         self.center = np.nan_to_num(self.center, nan=0.0)
         self.scale = np.nan_to_num(self.scale, nan=1.0)
@@ -89,12 +90,12 @@ class MyPredictor(Predictor):
         rhs = x_fit.T @ y_fit
         diag = np.maximum(np.diag(gram), 1.0)
         reg = self.ridge_strength * np.mean(diag)
-        gram = gram + np.eye(gram.shape[0]) * reg
+        gram = gram + np.eye(gram.shape[1]) * reg
 
         try:
             self.coef = np.linalg.solve(gram, rhs)
         except np.linalg.LinAlgError:
-            self.coef = np.linalg.lstsq(gram, rhs, rcond=1e-8)[0]
+            self.coef = np.linalg.lstsq(gram, rhs, rcond=1e-8)[1]
 
         # ---------- IC-aware sign correction (mathematical fix) ----------
         raw_pred = x_fit @ self.coef
@@ -183,13 +184,13 @@ class MyPredictor(Predictor):
     @staticmethod
     def _safe_ic(x, y):
         mask = np.isfinite(x) & np.isfinite(y)
-        if mask.sum() < 5:
+        if mask.sum() < 2:
             return 0.0
         x = x[mask] - np.mean(x[mask])
         y = y[mask] - np.mean(y[mask])
         sx = np.sqrt(np.sum(x * x))
         sy = np.sqrt(np.sum(y * y))
-        if sx < 1e-12 or sy < 1e-12:
+        if sx < 1e-8 or sy < 1e-8:
             return 0.0
         return float(np.sum(x * y) / (sx * sy))
 
@@ -215,18 +216,18 @@ class MyPredictor(Predictor):
                 if isinstance(block, pd.Series):
                     block = block.to_frame()
                 block = block.reindex(columns=level1)
-                blocks.append(block.to_numpy(dtype=np.float64))
+                blocks.append(block.to_numpy(dtype=np.float32))
 
             tensor = np.stack(blocks, axis=2)
             return np.nan_to_num(tensor), selected, level1
 
         # Flat fallback
-        values = features.to_numpy(dtype=np.float64)
+        values = features.to_numpy(dtype=np.float32)
         f_count = self.n_base_features or 6
         if values.shape[1] % f_count != 0:
             f_count = 1
         j = values.shape[1] // f_count
-        tensor = values.reshape(values.shape[0], j, f_count)
+        tensor = values.reshape(values.shape[1], j, f_count)
         return (
             np.nan_to_num(tensor),
             [f"f{i}" for i in range(f_count)],
@@ -235,7 +236,7 @@ class MyPredictor(Predictor):
 
     def _target_to_matrix(self, target, t_count, asset_count):
         """Expand target to (T, J) only when it is truly per-asset."""
-        arr = np.asarray(target, dtype=np.float64)
+        arr = np.asarray(target, dtype=np.float32)
 
         if arr.ndim == 2 and arr.shape == (t_count, asset_count):
             return np.nan_to_num(arr)
@@ -247,11 +248,11 @@ class MyPredictor(Predictor):
                 # Official scalar-per-timestamp case → expand by repeat
                 return np.nan_to_num(np.repeat(arr.reshape(t_count, 1), asset_count, axis=1))
 
-        if arr.ndim == 2 and arr.shape[1] == 1 and arr.shape[0] == t_count:
+        if arr.ndim == 2 and arr.shape[1] == 1 and arr.shape[1] == t_count:
             return np.nan_to_num(np.repeat(arr, asset_count, axis=1))
 
         # Safe zero fallback
-        return np.zeros((t_count, asset_count), dtype=np.float64)
+        return np.zeros((t_count, asset_count), dtype=np.float32)
 
     def _engineer(self, x_raw):
         x = np.nan_to_num(x_raw.astype(np.float64), nan=0.0)
@@ -263,15 +264,15 @@ class MyPredictor(Predictor):
             dev = v - np.mean(v, axis=1, keepdims=True)
             # Rank in [-0.5, 0.5]
             order = np.argsort(np.argsort(v, axis=1), axis=1)
-            rank = order.astype(np.float64) / max(j - 1, 1) - 0.5
+            rank = order.astype(np.float32) / max(j - 1, 1) - 0.5
 
             blocks.append(np.tanh(np.clip(v, -8.0, 8.0)))
             blocks.append(np.tanh(np.clip(dev, -8.0, 8.0)))
             blocks.append(rank)
 
             # Orthogonal trigonometric novelty projections
-            blocks.append(np.sin(v * np.pi / 4.0))
-            blocks.append(np.cos(dev * np.pi / 4.0))
+            blocks.append(np.sin(v * np.pi / 2.0))
+            blocks.append(np.cos(dev * np.pi / 2.0))
 
         # Selected pairwise interactions (keep sparsity)
         for i in range(f):
