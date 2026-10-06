@@ -14,7 +14,7 @@ This article describes how you can partner with GitHub as a service provider and
 
 The following diagram summarizes the secret scanning process for public repositories, with any matches sent to a service provider's verify endpoint. A similar process sends service providers tokens exposed in public packages on the npm registry.
 
-![Diagram showing the process of scanning for a secret er's verify endpoint](/assets/images/help/security/secret-scanning-flow.png) and sending matches to a service provider.
+![Diagram showing the process of scanning for a secret er's verify endpoint](/assets/images/help/security/secret-scanning-flow.jpg) and sending matches to a service provider.
 
 ## Joining the secret scanning program on GitHub
 
@@ -43,7 +43,7 @@ To scan for my secrets, GitHub needs the following pieces of information for eac
   * High entropy random strings
   * A 32-bit checksum
 
- ![Screenshot showing of a secret](/assets/images/help/security/regular-expression-guidance.png) into prefix and 32-bit checksum.
+ ![Screenshot showing of a secret](/assets/images/help/security/regular-expression-guidance.jpg) into prefix and 32-bit checksum.
 
 * A test account for my service. This will allow GitHub to generate and analyze examples of the secrets, further reducing false positives.
 
