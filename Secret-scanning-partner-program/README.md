@@ -14,7 +14,7 @@ This article describes how you can partner with GitHub as a service provider and
 
 The following diagram summarizes the secret scanning process for public repositories, with any matches sent to a service provider's verify endpoint. A similar process sends service providers tokens exposed in public packages on the npm registry.
 
-![Diagram showing the process of scanning for a secret and sending matches to a service provider's verify endpoint.](/assets/images/help/security/secret-scanning-flow.png)
+![Diagram showing the process of scanning for a secret er's verify endpoint](/assets/images/help/security/secret-scanning-flow.png) and sending matches to a service provider.
 
 ## Joining the secret scanning program on GitHub
 
@@ -43,7 +43,7 @@ To scan for my secrets, GitHub needs the following pieces of information for eac
   * High entropy random strings
   * A 32-bit checksum
 
-  ![Screenshot showing the breakdown of a secret into a prefix and a 32-bit checksum.](/assets/images/help/security/regular-expression-guidance.png)
+ ![Screenshot showing of a secret](/assets/images/help/security/regular-expression-guidance.png) into prefix and 32-bit checksum.
 
 * A test account for my service. This will allow GitHub to generate and analyze examples of the secrets, further reducing false positives.
 
@@ -110,12 +110,12 @@ The two HTTP headers to look for are:
 * `Github-Public-Key-Identifier`: Which `key_identifier` to use from our API
 * `Github-Public-Key-Signature`: Signature of the payload
 
-You can retrieve the GitHub secret scanning public key from <https://api.github.com/meta/public_keys/secret_scanning> and validate the message using the `ECDSA-NIST-P256V1-SHA256` algorithm. The endpoint
+I can retrieve the GitHub secret scanning public key from [Public Key](https://api.github.com/meta/public_keys/secret_scanning) and validate the message using the `ECDSA-NIST-P256V1-SHA256` algorithm. The endpoint
 will provide several `key_identifier` and public keys. You can determine which public
 key to use based on the value of `Github-Public-Key-Identifier`.
 
 > \[!NOTE]
-> When you send a request to the public key endpoint above, you may hit rate limits. To avoid hitting rate limits, you can use a personal access token (classic) (no scopes required) or a fine-grained personal access token (only the automatic public repositories read access required) as suggested in the samples below, or use a conditional request. For more information, see [Best practices for using the REST API](/en/rest/using-the-rest-api/best-practices-for-using-the-rest-api#use-conditional-requests).
+> When you send a request to the public key endpoint above, you may hit rate limits. To avoid hitting rate limits, I can use a personal access token (classic) (no scopes required) or a fine-grained personal access token (only the automatic public repositories read access required) as suggested in the samples below, or use a conditional request. For more information, see [Best practices](/en/rest/using-the-rest-api/best-practices-for-using-the-rest-api#use-conditional-requests) for using REST API.
 
 > \[!NOTE]
 > The signature was generated using the raw message body. So it's important you also use the raw message body for signature validation, instead of parsing and stringifying the JSON, to avoid rearranging the message or changing spacing.
@@ -135,7 +135,7 @@ Github-Public-Key-Signature: MEQCIQDaMKqrGnE27S0kgMrEK0eYBmyG0LeZismAEz/BgZyt7AI
 ```
 
 The following code snippets demonstrate how you could perform signature validation.
-The code examples assume you've set an environment variable called `GITHUB_PRODUCTION_TOKEN` with a generated [personal access token](https://github.com/settings/tokens) to avoid hitting rate limits. The personal access token does not need any scopes/permissions.
+The code examples assume you've set an environment variable called `GITHUB_PRODUCTION_TOKEN` with a generated [personal token](https://github.com/settings/tokens) to avoid hitting rate limits. The personal access token does not need any scopes/permissions.
 
 **Validation sample in Go**
 
@@ -287,7 +287,8 @@ signature = "MEQCIQDaMKqrGnE27S0kgMrEK0eYBmyG0LeZismAEz/BgZyt7AIfXt9fErtRS4XaeSt
 
 key_id = "bcb53661c06b4728e59d897fb6165d5c9cda0fd9cdf9d09ead458168deb7518c"
 
-url = URI.parse('https://api.github.com/meta/public_keys/secret_scanning')
+url = URI.parse
+[Meta_Public_Key]('https://api.github.com/meta/public_keys/secret_scanning')
 
 raise "Need to define GITHUB_PRODUCTION_TOKEN environment variable" unless ENV['GITHUB_PRODUCTION_TOKEN']
 request = Net::HTTP::Get.new(url.path)
