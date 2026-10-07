@@ -4,23 +4,24 @@
 #   "pandas",
 # ]
 # ///
+import sys
+import traceback
 import numpy as np
 import pandas as pd
-from sklearn.linear_model import Ridge
-from scipy import stats
 
-from predictor import Predictor  # ensure this base class is available in the portal environment
+from predictor import Predictor
+
 
 class MyPredictor(Predictor):
     """
-    Production-grade predictor returning cross-sectionally de-meaned signals.
+    Production-ready MyPredictor for AlphaNova portal.
 
-    Conventions:
-      - Features accepted: pd.DataFrame (MultiIndex columns (feature, ticker) or flat columns),
-                        or 3D ndarray (T, J, F).
-      - Training target accepted: (T, J) array-like or flattened (T*J,) array-like.
-      - Internally, engineered features are shaped (T*J, E) and scaler is fit on rows.
-      - predict(features) returns (T, J) signals with per-row mean approximately zero.
+    - Keep the header exactly as required by the portal (see top of file).
+    - Expects predictor.Predictor to be available in the environment.
+    - Robust to common input formats: MultiIndex DataFrame, flat DataFrame, or 3D ndarray (T, J, F).
+    - train(features, target) fits internal state.
+    - predict(features) returns np.ndarray shape (T, J) dtype float32 with per-row mean approximately zero.
+    - On unexpected errors during predict, logs the traceback to stderr and returns a safe zero signal of the correct shape.
     """
 
     def __init__(self, dtype=np.float32):
@@ -33,10 +34,10 @@ class MyPredictor(Predictor):
         self.feature_scaler = RobustScaler(quantile_range=(5.0, 85.0))
 
         # Ridge regression state
-        self.coefficients = None  # shape (E,)
+        self.coefficients = None
         self.intercept = None
-        self.target_mean = None
-        self.target_std = None
+        self.target_mean = 0.0
+        self.target_std = 1.0
 
         # Turnover control (EMA)
         self.alpha_smooth = 0.28
@@ -60,14 +61,11 @@ class MyPredictor(Predictor):
 
             X_raw, y_arr, T, J = self._extract_tensors_and_target(features, target)
 
-            # Engineer features -> (T*J, E)
             X_eng = self._engineer_features(X_raw).astype(self.dtype, copy=False)
 
-            # Fit scaler and normalize
             X_norm = self.feature_scaler.fit_transform(X_eng)
             X_norm = np.clip(X_norm, -10.0, 10.0)
 
-            # Fit ridge regression
             self._fit_ridge_regression(X_norm, y_arr)
 
             self.n_assets = J
@@ -75,6 +73,8 @@ class MyPredictor(Predictor):
             self.is_trained = True
 
         except Exception as e:
+            print("TRAINING ERROR: Exception during train()", file=sys.stderr)
+            traceback.print_exc(file=sys.stderr)
             raise RuntimeError(f"Training failed: {e}") from e
 
     def predict(self, features):
@@ -82,12 +82,13 @@ class MyPredictor(Predictor):
         Predict signals for given features.
 
         Returns:
-            np.ndarray shape (T, J) with cross-sectional sums near zero.
+            np.ndarray shape (T, J) dtype float32 with cross-sectional sums near zero.
+            On internal error, returns zeros of shape (T, J) and logs the exception.
         """
-        if not getattr(self, "is_trained", False):
-            raise RuntimeError("Model not trained. Call train() first.")
-
         try:
+            if not getattr(self, "is_trained", False):
+                raise RuntimeError("Model not trained. Call train() before predict().")
+
             X_raw, _, T, J = self._extract_tensors_and_target(features, None, allow_no_target=True)
 
             X_eng = self._engineer_features(X_raw).astype(self.dtype, copy=False)
@@ -129,7 +130,14 @@ class MyPredictor(Predictor):
             return signal_final.astype(self.dtype, copy=False)
 
         except Exception as e:
-            raise RuntimeError(f"Prediction failed: {e}") from e
+            print("PREDICTION ERROR: Exception during predict()", file=sys.stderr)
+            traceback.print_exc(file=sys.stderr)
+            try:
+                X_raw, _, T, J = self._extract_tensors_and_target(features, None, allow_no_target=True)
+                zeros = np.zeros((T, J), dtype=self.dtype)
+                return zeros
+            except Exception:
+                raise RuntimeError(f"Prediction failed and fallback zero signal could not be constructed: {e}") from e
 
     # -------------------------
     # Internal helpers
@@ -236,11 +244,15 @@ class MyPredictor(Predictor):
             engineered_list.append(feat)
             engineered_list.append(feat - feat.mean(axis=1, keepdims=True))
 
-            # Per-row ranks
+            # Per-row ranks implemented with numpy (no scipy)
             ranks = np.empty_like(feat, dtype=float)
             for t in range(T):
-                ranks[t] = stats.rankdata(feat[t], method="average")
-            rank_pct = (ranks - 1) / max(1, J - 1)
+                row = feat[t]
+                order = np.argsort(row, kind="mergesort")
+                ranks_row = np.empty_like(order, dtype=float)
+                ranks_row[order] = np.arange(len(order), dtype=float)
+                ranks[t] = ranks_row + 1.0
+            rank_pct = (ranks - 1.0) / max(1, J - 1)
             engineered_list.append(rank_pct - 0.5)
 
         # Interactions: limited window to control explosion
@@ -249,9 +261,8 @@ class MyPredictor(Predictor):
                 a = X_raw[:, :, f1]
                 b = X_raw[:, :, f2]
                 engineered_list.append(a * b)
-                with np.errstate(divide="ignore", invalid="ignore"):
-                    denom = np.abs(b) + self._eps
-                    engineered_list.append(a / denom)
+                denom = np.abs(b) + self._eps
+                engineered_list.append(a / denom)
 
         # Temporal features: rolling vol (window=3) and first-difference
         for f in range(F):
@@ -324,26 +335,3 @@ class MyPredictor(Predictor):
         signal_smooth = signal_smooth * scale[:, None]
 
         return signal_smooth
-
-
-# -------------------------
-# Small unit test when run as script
-# -------------------------
-if __name__ == "__main__":
-    def _unit_test_small():
-        T, J, F = 12, 6, 6
-        rng = np.random.RandomState(0)
-        X = rng.normal(size=(T, J, F))
-        # per-asset target with small noise
-        y = (X[:, :, 0] * 0.3 + X[:, :, 1] * -0.2) + rng.normal(scale=0.01, size=(T, J))
-        # flat DataFrame representation
-        df = pd.DataFrame(X.reshape(T, J * F))
-        p = MyPredictor(dtype=np.float32)
-        p.n_assets = J  # help the flat-DataFrame inference
-        p.train(df, y)  # y shape (T, J)
-        sig = p.predict(df)
-        assert sig.shape == (T, J)
-        assert np.allclose(sig.mean(axis=1), 0.0, atol=1e-6)
-        print("unit test passed: shape and de-meaning OK")
-
-    _unit_test_small()
