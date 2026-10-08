@@ -46,11 +46,11 @@ As the founder and leader of **Vane Enterprise LLC**, I drive innovation through
 
 ## 💼 Educational & Professional Background
 
-- **Masters in Marketing & Innovation**: From Anglia Ruskin University, Chelmsford, London. United Kingdom (🇬🇧).
+- **Masters in Marketing & Innovation**: From Anglia Ruskin University, Chelmsford, London. UK.
 - **PgD in Business Management & Strategy**:
-From Association of Business Practitioners (ABP). London, United Kingdom (🇬🇧).
+From Association of Business Practitioners (ABP). London, UK.
 - **Bachelor Of Business Administration (B.B.A)**:
-From University of Madras, Chennai. India (🇮🇳).
+From University of Madras, Chennai. India.
 - **Certified IMS Logical Relationships**: Dedicated and Partner Plus relationship building up with IMB Technical Talent.
 - **Business Owner & Entrepreneur**: Founded and scaled Vane Enterprise LLC.
 - **Offshore Architecture Engineer**: Designed complex systems for Amazon, Google, and enterprise clients.
@@ -233,9 +233,10 @@ I'm always interested in discussing innovative solutions, exploring new technolo
 ### 📫 Contact & Social Links
 
 - **Email**: [harigov63@gmail.com](mailto:harigov63@gmail.com) or [mdabulhossain1008@gmail.com](mailto:mdabulhossain1008@gmail.com)
-- **My-Expert-Portfolio**: [MD ABUL HOSSAIN](https://mdabul.netlify.app)
-- **Facebook**: [MD ABUL HOSSAIN](https://www.facebook.com/mdabulhossain1008)
-- **Instagram**: [MD ABUL HOSSAIN](https://www.instagram.com/mdabulhossain2026)
+- **My-Expert-Portfolio**: [MD ABUL HOSSAIN](https://anticipatedd.github.io/mdhossain/)
+- **My AppWeb**: [My AppWeb](https://mdabul.netlify.app)
+- **Facebook**: [Facebook](https://www.facebook.com/mdabulhossain1008)
+- **Instagram**: [Instagram](https://www.instagram.com/mdabulhossain2026)
 - **Organization**: [Vane Enterprise LLC](https://vane-enterprise.github.io)
 - **Alternative GitHub**: [@myou260312-eng](https://github.com/myou260312-eng)
 - **Project**: [Vane-Guard Sovereign Framework](https://vane-guard-sovereign-framework.vercel.app)
