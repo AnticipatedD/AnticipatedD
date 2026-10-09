@@ -3,7 +3,7 @@
 ![F&T Excellence](https://img.shields.io/badge/F%26T-Excellence_Award-2E86AB?style=flat-square)
 ![IBM Achievements](https://img.shields.io/badge/IBM-Certified_Achievements-054ADA?style=flat-square&logo=ibm&logoColor=white)
 ![IBM Partner Plus](https://img.shields.io/badge/IBM-Partner_Plus-0F62FE?style=flat-square&logo=ibm&logoColor=white) 
-![Microsoft Learn Profile](https://img.shields.io/badge/Microsoft_Learn-170_Badges_%7C_34_Trophies_%7C_Level_12-0078D4?style=flat-square&logo=microsoft&logoColor=white)
+![Microsoft Learn Profile](https://img.shields.io/badge/Microsoft_Learn-224_Badges_%7C_45_Trophies_%7C_Level_13-0078D4?style=flat-square&logo=microsoft&logoColor=white)
 ![Official Partner](https://img.shields.io/badge/Official-Microsoft_Business_Partner-00BCF2?style=flat-square&logo=microsoft&logoColor=white)
 
 ### 📚 Academic Citation & Verified DOI
