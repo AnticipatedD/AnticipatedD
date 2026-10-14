@@ -12,8 +12,8 @@ from predictor import Predictor
 
 class MyPredictor(Predictor):
     """
-    AlphaNova Production Strategy
-    Cross-Sectional Rank → Non-Linear Expansion → Spherical Projection → L1 Hysteresis
+    Asymmetric Rank-Difference & Product Engine
+    Designed for high City / Global novelty while improving stability
     """
 
     def __init__(self):
@@ -22,17 +22,19 @@ class MyPredictor(Predictor):
         self.prev_signal = None
         self.prev_tickers = None
 
-        self.target_bound = 0.18
-        self.optimal_concentration = 0.27
-        self.l1_hysteresis_threshold = 0.88
-        self.smoothing = 0.88
+        self.target_concentration = 0.24
+        self.ema_alpha = 0.15          # slightly stronger smoothing
+        self.clip_bound = 0.22
 
     def train(self, features: pd.DataFrame, target=None) -> None:
         if features is not None and not features.empty:
             try:
-                self.feature_names = list(features.columns.get_level_values(0).unique())
+                names = list(features.columns.get_level_values(0).unique())
+                self.feature_names = sorted(names)[:6]
             except Exception:
                 self.feature_names = None
+        else:
+            self.feature_names = None
 
     def predict(self, features: pd.DataFrame) -> pd.DataFrame:
         try:
@@ -40,85 +42,81 @@ class MyPredictor(Predictor):
         except Exception:
             tickers = pd.Index([])
 
-        zero_signal = pd.DataFrame(0.0, index=getattr(features, "index", []), columns=tickers, dtype=np.float32)
+        zero = pd.DataFrame(0.0, index=getattr(features, "index", []), columns=tickers, dtype=np.float32)
 
-        if (features is None or features.empty or 
-            self.feature_names is None or len(self.feature_names) < 2):
-            return zero_signal
+        if (
+            features is None
+            or features.empty
+            or self.feature_names is None
+            or len(self.feature_names) < 6
+        ):
+            return zero
 
         try:
-            # 1. Cross-sectional rank transform
-            ranks = {}
-            for feat in self.feature_names:
-                if feat not in features.columns.get_level_values(0):
-                    continue
-                block = features[feat].astype(np.float64)
-                r = (block.rank(axis=1, pct=True, method='average') - 0.5) * 2.0
-                ranks[feat] = r.fillna(0.0).to_numpy()
+            # 1. Cross-sectional ranks → [-1, 1]
+            ranks = []
+            for name in self.feature_names:
+                block = features[name].astype(np.float64)
+                r = (block.rank(axis=1, pct=True, method="average") - 0.5) * 2.0
+                ranks.append(np.nan_to_num(r.to_numpy(), nan=0.0))
 
-            if len(ranks) < 2:
-                return zero_signal
+            f = ranks  # list of (T, J)
+            T, J = f[0].shape
 
-            N_time, J_assets = next(iter(ranks.values())).shape
+            # 2. Asymmetric difference + product basis (novelty driver)
+            s = np.zeros((T, J), dtype=np.float64)
 
-            # 2. Non-Linear Spatial Expansion
-            interaction_blocks = []
-            feat_list = list(ranks.keys())
+            # Strong differences
+            s += 1.00 * (f[0] - f[3])
+            s += 0.70 * (f[1] - f[4])
+            s += 0.50 * (f[2] - f[5])
 
-            for i, f1 in enumerate(feat_list):
-                interaction_blocks.append(np.tanh(ranks[f1] * 2.0))
-                for j in range(i + 1, len(feat_list)):
-                    f2 = feat_list[j]
-                    interaction_blocks.append(
-                        np.sin(ranks[f1] * np.pi * 0.25) * np.cos(ranks[f2] * np.pi * 0.25)
-                    )
-                    interaction_blocks.append(ranks[f1] * np.abs(ranks[f2]))
+            # Selected asymmetric products
+            s += 0.40 * (f[0] * np.abs(f[5]))
+            s += 0.35 * (f[1] * f[2])
+            s += 0.30 * (np.sign(f[3]) * f[4] * f[5])
 
-            raw_velocity = np.mean(interaction_blocks, axis=0)
+            # Higher-order term
+            s += 0.25 * (f[0] * f[1] - f[2] * f[3])
 
-            # 3. Demean + Spherical projection
-            velocity_demeaned = raw_velocity - raw_velocity.mean(axis=1, keepdims=True)
-            norms = np.linalg.norm(velocity_demeaned, axis=1, keepdims=True)
-            norms = np.maximum(norms, 1e-8)
-            sphere_target = (velocity_demeaned / norms) * self.optimal_concentration
+            # 3. Demean
+            s -= s.mean(axis=1, keepdims=True)
 
-            # 4. L1 Causal Hysteresis (stronger protection)
-            final_positions = np.zeros_like(sphere_target)
+            # 4. Scale to target concentration
+            norms = np.linalg.norm(s, axis=1, keepdims=True)
+            norms = np.maximum(norms, 1e-10)
+            signal = s / norms * self.target_concentration
 
-            if (self.prev_signal is not None and 
-                self.prev_tickers is not None and 
-                len(self.prev_signal) == J_assets and 
-                list(self.prev_tickers) == list(tickers)):
-                active_position = self.prev_signal.copy()
+            # 5. Causal EMA (turnover control)
+            out = np.zeros_like(signal)
+
+            if (
+                self.prev_signal is not None
+                and self.prev_tickers is not None
+                and len(self.prev_signal) == J
+                and list(self.prev_tickers) == list(tickers)
+            ):
+                active = self.prev_signal.copy()
             else:
-                active_position = np.zeros(J_assets, dtype=np.float64)
+                active = signal[0].copy()
 
-            for t in range(N_time):
-                target_position = sphere_target[t]
-                l1_delta = np.sum(np.abs(target_position - active_position))
+            for t in range(T):
+                active = self.ema_alpha * signal[t] + (1.0 - self.ema_alpha) * active
+                active -= active.mean()
+                out[t] = active
 
-                if l1_delta < self.l1_hysteresis_threshold:
-                    current = active_position.copy()
-                else:
-                    current = (1.0 - self.smoothing) * target_position + self.smoothing * active_position
-                    current -= current.mean()
+            # 6. Final cleanup
+            out -= out.mean(axis=1, keepdims=True)
+            out = np.clip(out, -self.clip_bound, self.clip_bound)
+            out = np.nan_to_num(out, nan=0.0)
 
-                final_positions[t] = current
-                active_position = current.copy()
+            self.prev_signal = out[-1].copy()
+            self.prev_tickers = list(tickers)
 
-            # 5. Final formatting
-            final_df = pd.DataFrame(final_positions, index=features.index, columns=tickers)
-            final_df = final_df.sub(final_df.mean(axis=1), axis=0)
-            final_df = final_df.clip(-self.target_bound, self.target_bound)
-            final_df = final_df.sub(final_df.mean(axis=1), axis=0)
-
-            self.prev_signal = final_df.iloc[-1].to_numpy(dtype=np.float64)
-            self.prev_tickers = list(final_df.columns)
-
-            return final_df.astype(np.float32)
+            return pd.DataFrame(out.astype(np.float32), index=features.index, columns=tickers)
 
         except Exception:
-            return zero_signal
+            return zero
 
 
 predictor = MyPredictor()
