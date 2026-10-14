@@ -12,10 +12,9 @@ from predictor import Predictor
 
 class MyPredictor(Predictor):
     """
-    AlphaNova Season 1 - New Approach
-    Robust Cross-Sectional Z-Score Ensemble 
-    + Inverse-Volatility Scaling 
-    + Soft Exponential Smoothing
+    AlphaNova Season 1 - Third Approach
+    Quantile Transform + Power Non-linearity 
+    + Exact L1 Projection + Slow Decay
     """
 
     def __init__(self):
@@ -25,9 +24,10 @@ class MyPredictor(Predictor):
         self.prev_tickers = None
 
         # Parameters
-        self.ema_alpha = 0.35          # light temporal smoothing
-        self.target_vol = 0.18         # target cross-sectional volatility
-        self.clip_bound = 0.22
+        self.power = 1.35              # non-linearity strength
+        self.l1_target = 0.25          # exact L1 norm target
+        self.decay = 0.92              # slow decay factor
+        self.clip_bound = 0.20
 
     def train(self, features: pd.DataFrame, target: pd.DataFrame = None) -> None:
         if features is not None and not features.empty:
@@ -50,38 +50,42 @@ class MyPredictor(Predictor):
 
         try:
             # -------------------------------------------------
-            # 1. Robust cross-sectional z-score for every feature
+            # 1. Cross-sectional quantile transform (0 → 1)
             # -------------------------------------------------
-            z_list = []
+            q_list = []
             for feat in self.feature_names:
                 if feat not in features.columns.get_level_values(0):
                     continue
                 block = features[feat].astype(np.float64)
-                
-                # Robust z-score (median + MAD)
-                med = block.median(axis=1)
-                mad = (block.sub(med, axis=0)).abs().median(axis=1) + 1e-8
-                z = block.sub(med, axis=0).div(mad * 1.4826, axis=0)
-                z = z.fillna(0.0).clip(-4.0, 4.0)
-                z_list.append(z.to_numpy())
+                q = block.rank(axis=1, pct=True, method="average")
+                q = q.fillna(0.5)
+                q_list.append(q.to_numpy())
 
-            if len(z_list) == 0:
+            if len(q_list) == 0:
                 return zero
 
-            # Average all feature z-scores
-            raw = np.mean(z_list, axis=0)          # shape (T, J)
+            # Average quantiles across features
+            avg_q = np.mean(q_list, axis=0)          # (T, J)
+
+            # Center around 0.5 → range approx [-0.5, 0.5]
+            centered = avg_q - 0.5
 
             # -------------------------------------------------
-            # 2. Inverse-volatility scaling (target specific vol)
+            # 2. Power non-linearity (preserve sign)
             # -------------------------------------------------
-            cs_vol = np.std(raw, axis=1, keepdims=True) + 1e-8
-            scaled = raw * (self.target_vol / cs_vol)
+            signal = np.sign(centered) * (np.abs(centered) ** self.power)
 
             # -------------------------------------------------
-            # 3. Soft exponential moving average (temporal)
+            # 3. Exact L1 projection
             # -------------------------------------------------
-            T, J = scaled.shape
-            out = np.zeros_like(scaled)
+            l1 = np.sum(np.abs(signal), axis=1, keepdims=True) + 1e-8
+            signal = signal * (self.l1_target / l1)
+
+            # -------------------------------------------------
+            # 4. Slow decay toward previous position
+            # -------------------------------------------------
+            T, J = signal.shape
+            out = np.zeros_like(signal)
 
             if (self.prev_position is not None and 
                 self.prev_tickers is not None and 
@@ -92,17 +96,17 @@ class MyPredictor(Predictor):
                 prev = np.zeros(J)
 
             for t in range(T):
-                current = self.ema_alpha * scaled[t] + (1.0 - self.ema_alpha) * prev
-                current -= current.mean()          # strict demean
+                current = self.decay * prev + (1.0 - self.decay) * signal[t]
+                current -= current.mean()
                 out[t] = current
                 prev = current.copy()
 
             # -------------------------------------------------
-            # 4. Final formatting
+            # 5. Final formatting
             # -------------------------------------------------
             df = pd.DataFrame(out, index=features.index, columns=tickers)
             df = df.clip(-self.clip_bound, self.clip_bound)
-            df = df.sub(df.mean(axis=1), axis=0)   # final demean
+            df = df.sub(df.mean(axis=1), axis=0)
 
             # Store state
             self.prev_position = df.iloc[-1].to_numpy(dtype=np.float64)
@@ -112,5 +116,6 @@ class MyPredictor(Predictor):
 
         except Exception:
             return zero
-            
+
+
 predictor = MyPredictor()
