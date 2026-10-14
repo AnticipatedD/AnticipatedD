@@ -1,220 +1,148 @@
 # /// script
 # dependencies = [
 #   "numpy",
-#   "pandas",
-#   "scikit-learn"
+#   "pandas"
 # ]
 # ///
 
 import numpy as np
 import pandas as pd
-from sklearn.linear_model import Ridge
-
 from predictor import Predictor
 
 
 class MyPredictor(Predictor):
     """
-    AlphaNova Season 1 - Hardened Robust Predictor
-    Designed to survive padding, pickle reload, shape changes, and edge cases.
+    AlphaNova Season 1 - Refined Production Strategy
+    Best current approach: Cross-Sectional Rank → Non-Linear Expansion 
+    → Spherical Projection → L1 Hysteresis
     """
 
     def __init__(self):
         super().__init__()
-        self.n_assets = 1
-        self.n_features = 6
-        self.tickers = ["asset_0"]
-        self.feat_names = [f"f_{i}" for i in range(6)]
-        self.feature_means = np.zeros(6)
-        self.feature_stds = np.ones(6)
-        self.model = None
-        self.is_trained = False
+        self.feature_names = None
+        self.prev_signal = None
+        self.prev_tickers = None
 
-    def train(self, features, target):
-        np.random.seed(42)
+        # Tunable parameters (keep close to your best settings)
+        self.target_bound = 0.20
+        self.optimal_concentration = 0.28
+        self.l1_hysteresis_threshold = 1.12
+        self.smoothing = 0.80          # how much previous position to keep
 
+    def train(self, features: pd.DataFrame, target: pd.DataFrame = None) -> None:
+        if features is not None and not features.empty:
+            try:
+                self.feature_names = list(features.columns.get_level_values(0).unique())
+            except Exception:
+                self.feature_names = None
+
+    def predict(self, features: pd.DataFrame) -> pd.DataFrame:
+        # Always prepare a safe zero signal first
         try:
-            self._discover_structure(features, target)
-            X_raw, y_arr, T, J = self._extract(features, target)
-            self.n_assets = J
-            T, J, F = X_raw.shape
-            self.n_features = F
-
-            if y_arr is None or y_arr.size == 0:
-                self.is_trained = False
-                return
-
-            X_flat = X_raw.reshape(-1, F)
-            y_flat = y_arr.reshape(-1)
-
-            # Keep only valid targets
-            valid = np.isfinite(y_flat)
-            if not np.any(valid):
-                self.is_trained = False
-                return
-
-            X_train = X_flat[valid]
-            y_train = y_flat[valid]
-
-            # Impute
-            medians = np.nanmedian(X_train, axis=0)
-            medians = np.where(np.isfinite(medians), medians, 0.0)
-            X_train = np.where(np.isfinite(X_train), X_train, medians)
-
-            # Standardize
-            self.feature_means = np.mean(X_train, axis=0)
-            self.feature_stds = np.std(X_train, axis=0) + 1e-8
-
-            X_norm = (X_train - self.feature_means) / self.feature_stds
-            X_norm = np.clip(X_norm, -4.0, 4.0)
-
-            self.model = Ridge(alpha=50.0, fit_intercept=True, random_state=42)
-            self.model.fit(X_norm, y_train)
-            self.is_trained = True
-
+            tickers = features.columns.get_level_values(1).unique()
         except Exception:
-            self.is_trained = False
+            tickers = pd.Index([])
 
-    def predict(self, features):
-        # Always return a valid DataFrame — never raise
+        zero_signal = pd.DataFrame(
+            0.0, 
+            index=features.index if features is not None else [], 
+            columns=tickers, 
+            dtype=np.float32
+        )
+
+        if (features is None or features.empty or 
+            self.feature_names is None or len(self.feature_names) < 2):
+            return zero_signal
+
         try:
-            T = len(features) if hasattr(features, "__len__") else 1
-            index = getattr(features, "index", pd.RangeIndex(T))
-            columns = self.tickers if self.tickers else [f"asset_{i}" for i in range(self.n_assets)]
-
-            if T == 0:
-                return pd.DataFrame(index=index, columns=columns, dtype=float)
-
-            X_raw, _, T, J = self._extract(features, target=None)
-            T, J, F = X_raw.shape
-
-            # Safety: if model not trained or shape mismatch → zeros
-            if (not self.is_trained or 
-                self.model is None or 
-                self.feature_means is None or 
-                len(self.feature_means) != F):
-                return pd.DataFrame(0.0, index=index, columns=columns[:J] if J <= len(columns) else columns)
-
-            X_flat = X_raw.reshape(-1, F)
-            X_flat = np.nan_to_num(X_flat, nan=0.0, posinf=0.0, neginf=0.0)
-
-            means = self.feature_means
-            stds = self.feature_stds
-
-            X_norm = (X_flat - means) / stds
-            X_norm = np.clip(X_norm, -4.0, 4.0)
-
-            raw = self.model.predict(X_norm).reshape(T, J)
-
-            # Strict cross-sectional demean + L1 scale
-            out = np.zeros_like(raw)
-            for t in range(T):
-                row = raw[t]
-                if not np.isfinite(row).any():
+            # -------------------------------------------------
+            # 1. Cross-sectional rank transform (vectorized)
+            # -------------------------------------------------
+            ranks = {}
+            for feat in self.feature_names:
+                if feat not in features.columns.get_level_values(0):
                     continue
-                row = np.nan_to_num(row, nan=np.nanmedian(row) if np.isfinite(row).any() else 0.0)
-                row = row - np.mean(row)
-                l1 = np.sum(np.abs(row))
-                if l1 > 1e-12:
-                    row /= l1
-                out[t] = row - np.mean(row)
+                block = features[feat].astype(np.float64)
+                r = (block.rank(axis=1, pct=True, method="average") - 0.5) * 2.0
+                ranks[feat] = r.fillna(0.0).to_numpy()
 
-            # Align columns safely
-            final_columns = columns[:J] if J <= len(columns) else [f"asset_{i}" for i in range(J)]
-            return pd.DataFrame(out, index=index, columns=final_columns)
+            if len(ranks) < 2:
+                return zero_signal
 
-        except Exception:
-            # Ultimate fallback
-            T = len(features) if hasattr(features, "__len__") else 1
-            index = getattr(features, "index", pd.RangeIndex(T))
-            columns = self.tickers if self.tickers else [f"asset_{i}" for i in range(max(1, self.n_assets))]
-            return pd.DataFrame(0.0, index=index, columns=columns)
+            N_time, J_assets = next(iter(ranks.values())).shape
 
-    def _discover_structure(self, features, target):
-        try:
-            if isinstance(features, pd.DataFrame):
-                if isinstance(features.columns, pd.MultiIndex):
-                    self.feat_names = sorted(features.columns.get_level_values(0).unique().tolist())
-                    self.tickers = sorted(features.columns.get_level_values(1).unique().tolist())
-                else:
-                    self.tickers = [str(c) for c in features.columns]
-                    self.feat_names = [f"f_{i}" for i in range(6)]
-            elif hasattr(target, "columns"):
-                self.tickers = [str(c) for c in target.columns]
-                self.feat_names = [f"f_{i}" for i in range(6)]
+            # -------------------------------------------------
+            # 2. Non-linear spatial expansion
+            # -------------------------------------------------
+            interaction_blocks = []
+
+            feat_list = list(ranks.keys())
+            for i, f1 in enumerate(feat_list):
+                interaction_blocks.append(np.tanh(ranks[f1] * 2.0))
+
+                for j in range(i + 1, len(feat_list)):
+                    f2 = feat_list[j]
+                    interaction_blocks.append(
+                        np.sin(ranks[f1] * np.pi * 0.25) * np.cos(ranks[f2] * np.pi * 0.25)
+                    )
+                    interaction_blocks.append(ranks[f1] * np.abs(ranks[f2]))
+
+            raw_velocity = np.mean(interaction_blocks, axis=0)
+
+            # -------------------------------------------------
+            # 3. Geometric demean + spherical projection
+            # -------------------------------------------------
+            velocity_demeaned = raw_velocity - raw_velocity.mean(axis=1, keepdims=True)
+
+            norms = np.linalg.norm(velocity_demeaned, axis=1, keepdims=True)
+            norms = np.maximum(norms, 1e-10)
+            sphere_target = (velocity_demeaned / norms) * self.optimal_concentration
+
+            # -------------------------------------------------
+            # 4. L1 Causal Hysteresis (Turnover control)
+            # -------------------------------------------------
+            final_positions = np.zeros_like(sphere_target)
+
+            # Initialize previous position safely
+            if (self.prev_signal is not None and 
+                self.prev_tickers is not None and 
+                len(self.prev_signal) == J_assets and
+                self.prev_tickers.equals(tickers)):
+                active_position = self.prev_signal.copy()
             else:
-                n = 1
-                if hasattr(target, "shape") and len(target.shape) > 1:
-                    n = target.shape[1]
-                self.tickers = [f"asset_{i}" for i in range(n)]
-                self.feat_names = [f"f_{i}" for i in range(6)]
+                active_position = np.zeros(J_assets, dtype=np.float64)
 
-            self.n_assets = max(1, len(self.tickers))
-            self.n_features = max(1, len(self.feat_names))
-        except Exception:
-            self.n_assets = 1
-            self.n_features = 6
-            self.tickers = ["asset_0"]
-            self.feat_names = [f"f_{i}" for i in range(6)]
+            for t in range(N_time):
+                target_pos = sphere_target[t]
+                delta = np.sum(np.abs(target_pos - active_position))
 
-    def _extract(self, features, target=None):
-        """Extremely tolerant tensor extraction"""
-        try:
-            if isinstance(features, pd.DataFrame):
-                T = len(features)
-                if isinstance(features.columns, pd.MultiIndex):
-                    feat_names = self.feat_names
-                    tickers = self.tickers
-                    J, F = len(tickers), len(feat_names)
-                    X = np.zeros((T, J, F), dtype=np.float64)
-                    for fi, f in enumerate(feat_names):
-                        for ji, tk in enumerate(tickers):
-                            key = (f, tk)
-                            if key in features.columns:
-                                X[:, ji, fi] = np.nan_to_num(features[key].to_numpy(dtype=float), nan=0.0)
+                if delta < self.l1_hysteresis_threshold:
+                    current = active_position.copy()
                 else:
-                    arr = np.nan_to_num(features.to_numpy(dtype=float), nan=0.0)
-                    J = self.n_assets
-                    F = self.n_features
-                    needed = J * F
-                    fixed = np.zeros((T, needed), dtype=np.float64)
-                    fixed[:, :min(arr.shape[1], needed)] = arr[:, :min(arr.shape[1], needed)]
-                    X = fixed.reshape(T, J, F)
-            else:
-                arr = np.nan_to_num(np.asarray(features, dtype=float), nan=0.0)
-                if arr.ndim == 3:
-                    X = arr
-                else:
-                    T = arr.shape[0] if arr.ndim >= 1 else 1
-                    J = self.n_assets
-                    F = self.n_features
-                    needed = J * F
-                    fixed = np.zeros((T, needed), dtype=np.float64)
-                    if arr.ndim == 2:
-                        fixed[:, :min(arr.shape[1], needed)] = arr[:, :min(arr.shape[1], needed)]
-                    elif arr.ndim == 1:
-                        fixed[:, 0] = arr
-                    X = fixed.reshape(T, J, F)
+                    current = (1.0 - self.smoothing) * target_pos + self.smoothing * active_position
+                    current -= current.mean()
 
-            # Target handling
-            y = None
-            if target is not None:
-                tarr = np.asarray(target, dtype=float).ravel()
-                expected = X.shape[0] * X.shape[1]
-                if tarr.size >= expected:
-                    y = tarr[:expected]
-                elif tarr.size == X.shape[0]:
-                    y = np.repeat(tarr, X.shape[1])
-                else:
-                    y = np.zeros(expected)
+                final_positions[t] = current
+                active_position = current.copy()
 
-            return X, y, X.shape[0], X.shape[1]
+            # -------------------------------------------------
+            # 5. Final compliance formatting
+            # -------------------------------------------------
+            final_df = pd.DataFrame(final_positions, index=features.index, columns=tickers)
+
+            # Double demean + clip for safety
+            final_df = final_df.sub(final_df.mean(axis=1), axis=0)
+            final_df = final_df.clip(-self.target_bound, self.target_bound)
+            final_df = final_df.sub(final_df.mean(axis=1), axis=0)
+
+            # Store state for next call
+            self.prev_signal = final_df.iloc[-1].to_numpy(dtype=np.float64)
+            self.prev_tickers = final_df.columns.copy()
+
+            return final_df.astype(np.float32)
 
         except Exception:
-            T = len(features) if hasattr(features, "__len__") else 1
-            J = self.n_assets
-            F = self.n_features
-            return np.zeros((T, J, F)), None, T, J
+            return zero_signal
 
 
 # Required by the platform
