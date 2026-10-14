@@ -12,9 +12,8 @@ from predictor import Predictor
 
 class MyPredictor(Predictor):
     """
-    AlphaNova Season 1 Cycle 4 - Refined Fourth Approach
-    Extreme-Tail Asymmetry + Controlled Sparsity
-    Target: Push Sharpe from -0.0074 into positive territory
+    AlphaNova - Conservative refinement of the 0.0074 version
+    Only small changes to push Sharpe higher
     """
 
     def __init__(self):
@@ -23,10 +22,10 @@ class MyPredictor(Predictor):
         self.prev_position = None
         self.prev_tickers = None
 
-        # Tuned parameters
-        self.tail_threshold = 0.20      # slightly wider tails
-        self.sparsity_power = 1.15      # less aggressive sparsity
-        self.l1_target = 0.28
+        # Very close to the 0.0074 parameters
+        self.tail_threshold = 0.20
+        self.sparsity_power = 1.15
+        self.l1_target = 0.235
         self.decay = 0.80
         self.clip_bound = 0.20
 
@@ -50,7 +49,6 @@ class MyPredictor(Predictor):
             return zero
 
         try:
-            # 1. Average cross-sectional quantiles
             q_list = []
             for feat in self.feature_names:
                 if feat not in features.columns.get_level_values(0):
@@ -64,22 +62,21 @@ class MyPredictor(Predictor):
 
             avg_q = np.mean(q_list, axis=0)
 
-            # 2. Extreme-tail asymmetry (refined)
+            # Extreme-tail asymmetry (same structure as 0.0074)
             upper = np.clip((avg_q - (1.0 - self.tail_threshold)) / self.tail_threshold, 0.0, 1.0)
             lower = np.clip((self.tail_threshold - avg_q) / self.tail_threshold, 0.0, 1.0)
 
-            # Milder asymmetry
-            raw = (upper ** 1.05) - (lower ** 1.25)
+            raw = (upper ** 1.05) - (lower ** 1.15)
 
-            # 3. Controlled sparsity
+            # Sparsity
             raw = np.sign(raw) * (np.abs(raw) ** self.sparsity_power)
 
-            # 4. Demean + L1 projection
+            # Demean + L1
             raw = raw - raw.mean(axis=1, keepdims=True)
-            l1 = np.sum(np.abs(raw), axis=1, keepdims=True) + 1e-12
+            l1 = np.sum(np.abs(raw), axis=1, keepdims=True) + 1e-9
             signal = raw * (self.l1_target / l1)
 
-            # 5. Temporal decay
+            # Temporal decay
             T, J = signal.shape
             out = np.zeros_like(signal)
 
@@ -97,7 +94,6 @@ class MyPredictor(Predictor):
                 out[t] = current
                 prev = current.copy()
 
-            # 6. Final cleanup
             df = pd.DataFrame(out, index=features.index, columns=tickers)
             df = df.clip(-self.clip_bound, self.clip_bound)
             df = df.sub(df.mean(axis=1), axis=0)
