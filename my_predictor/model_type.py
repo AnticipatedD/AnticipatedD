@@ -22,13 +22,12 @@ class MyPredictor(Predictor):
         self.prev_signal = None
         self.prev_tickers = None
 
-        # Small focused changes
-        self.target_bound = 0.19
-        self.optimal_concentration = 0.28      # slightly higher concentration
-        self.l1_hysteresis_threshold = 0.95    # tighter hysteresis band
-        self.smoothing = 0.85                  # slightly more weight on previous position
+        self.target_bound = 0.18
+        self.optimal_concentration = 0.27
+        self.l1_hysteresis_threshold = 0.88
+        self.smoothing = 0.88
 
-    def train(self, features: pd.DataFrame, target: pd.DataFrame = None) -> None:
+    def train(self, features: pd.DataFrame, target=None) -> None:
         if features is not None and not features.empty:
             try:
                 self.feature_names = list(features.columns.get_level_values(0).unique())
@@ -53,8 +52,8 @@ class MyPredictor(Predictor):
             for feat in self.feature_names:
                 if feat not in features.columns.get_level_values(0):
                     continue
-                block_val = features[feat].astype(np.float64)
-                r = (block_val.rank(axis=1, pct=True, method='average') - 0.5) * 2.0
+                block = features[feat].astype(np.float64)
+                r = (block.rank(axis=1, pct=True, method='average') - 0.5) * 2.0
                 ranks[feat] = r.fillna(0.0).to_numpy()
 
             if len(ranks) < 2:
@@ -68,7 +67,6 @@ class MyPredictor(Predictor):
 
             for i, f1 in enumerate(feat_list):
                 interaction_blocks.append(np.tanh(ranks[f1] * 2.0))
-
                 for j in range(i + 1, len(feat_list)):
                     f2 = feat_list[j]
                     interaction_blocks.append(
@@ -78,14 +76,13 @@ class MyPredictor(Predictor):
 
             raw_velocity = np.mean(interaction_blocks, axis=0)
 
-            # 3. Geometric demean + Spherical projection
+            # 3. Demean + Spherical projection
             velocity_demeaned = raw_velocity - raw_velocity.mean(axis=1, keepdims=True)
-
             norms = np.linalg.norm(velocity_demeaned, axis=1, keepdims=True)
             norms = np.maximum(norms, 1e-8)
             sphere_target = (velocity_demeaned / norms) * self.optimal_concentration
 
-            # 4. L1 Causal Hysteresis
+            # 4. L1 Causal Hysteresis (stronger protection)
             final_positions = np.zeros_like(sphere_target)
 
             if (self.prev_signal is not None and 
