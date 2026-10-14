@@ -11,73 +11,73 @@ from predictor import Predictor
 class MyPredictor(Predictor):
     """
     Production-Grade Quant Strategy for AlphaNova.
-    Explicitly optimized for a 6-Feature Measurement Framework.
-    Implements Rank-Space Directional Mapping with Cross-Feature Interaction Shrinkage.
+    Explicitly hardcoded and unrolled for exactly 6 Feature Measurements.
     """
     def __init__(self):
         super().__init__()
-        self.feature_names = None
-        self.feature_weights = None
-        self.interaction_weights = None
+        self.feature_weights = np.zeros(6, dtype=np.float64)
+        self.interaction_weights = np.zeros(15, dtype=np.float64)
         self.prev_signal = None
         self.prev_tickers = None
         
         # Hyperparameters optimized for 6 features and 5bp fee constraints
         self.target_bound = 1.35
         self.alpha_scale = 0.30
-        self.smoothing_factor = 0.40  # Faster tracking optimized for high-dimensional signals
-        self.shrinkage = 0.15         # Regularization factor for feature interaction blocks
+        self.smoothing_factor = 0.40  
+        self.shrinkage = 0.15         
 
     def train(self, features: pd.DataFrame, target: pd.DataFrame) -> None:
-        """
-        Calibrates optimal predictive weights explicitly for all 6 features
-        and their structural combinations.
-        """
         if features is None or target is None:
             return
             
-        self.feature_names = list(features.columns.get_level_values(0).unique())
-        tickers = features.columns.get_level_values(1).unique()
-        
-        # Ensure correct alignment of dates/times
+        feature_list = list(features.columns.get_level_values(0).unique())
+        # Enforce strict fallback checks to guarantee exactly 6 measurements are present
+        if len(feature_list) < 6:
+            return
+            
         common_idx = features.index.intersection(target.index)
         if len(common_idx) == 0:
             return
             
         feat_sub = features.loc[common_idx]
         targ_sub = target.loc[common_idx]
-        
-        # 1. Map individual linear rank coefficients for all 6 features
         t_rank = targ_sub.rank(axis=1, pct=True, method='max') - 0.5
         
-        self.feature_weights = {}
-        ranks_dict = {}
+        # 1. Unroll the 6 Base Ranks
+        r0 = feat_sub[feature_list[0]].rank(axis=1, pct=True, method='max') - 0.5
+        r1 = feat_sub[feature_list[1]].rank(axis=1, pct=True, method='max') - 0.5
+        r2 = feat_sub[feature_list[2]].rank(axis=1, pct=True, method='max') - 0.5
+        r3 = feat_sub[feature_list[3]].rank(axis=1, pct=True, method='max') - 0.5
+        r4 = feat_sub[feature_list[4]].rank(axis=1, pct=True, method='max') - 0.5
+        r5 = feat_sub[feature_list[5]].rank(axis=1, pct=True, method='max') - 0.5
         
-        for feat in self.feature_names:
-            f_rank = feat_sub[feat].rank(axis=1, pct=True, method='max') - 0.5
-            ranks_dict[feat] = f_rank
-            
-            # Cross-sectional covariance tracking
-            cov = (f_rank * t_rank).mean().mean()
-            self.feature_weights[feat] = cov
-            
-        # 2. Map explicit pair-wise interaction coefficients unique to a 6-feature universe
-        self.interaction_weights = {}
-        for i in range(len(self.feature_names)):
-            for j in range(i + 1, len(self.feature_names)):
-                f1, f2 = self.feature_names[i], self.feature_names[j]
-                # Non-linear interaction block
-                interact = ranks_dict[f1] * ranks_dict[f2]
+        # Calculate Base Directional Covariances for all 6 features
+        self.feature_weights[0] = (r0 * t_rank).mean().mean()
+        self.feature_weights[1] = (r1 * t_rank).mean().mean()
+        self.feature_weights[2] = (r2 * t_rank).mean().mean()
+        self.feature_weights[3] = (r3 * t_rank).mean().mean()
+        self.feature_weights[4] = (r4 * t_rank).mean().mean()
+        self.feature_weights[5] = (r5 * t_rank).mean().mean()
+        
+        # 2. Extract and Unroll exactly 15 Permutation Matrix Covariances
+        idx = 0
+        r_all = [r0, r1, r2, r3, r4, r5]
+        for i in range(6):
+            for j in range(i + 1, 6):
+                interact = r_all[i] * r_all[j]
                 interact_demeaned = interact.sub(interact.mean(axis=1), axis=0)
-                
-                cov_interact = (interact_demeaned * t_rank).mean().mean()
-                self.interaction_weights[f"{f1}_{f2}"] = cov_interact
+                self.interaction_weights[idx] = (interact_demeaned * t_rank).mean().mean()
+                idx += 1
 
     def predict(self, features: pd.DataFrame) -> pd.DataFrame:
         tickers = features.columns.get_level_values(1).unique()
         zero_signal = pd.DataFrame(0.0, index=features.index, columns=tickers, dtype=np.float32)
         
-        if len(features) == 0 or self.feature_names is None or self.feature_weights is None:
+        if len(features) == 0:
+            return zero_signal
+            
+        feature_list = list(features.columns.get_level_values(0).unique())
+        if len(feature_list) < 6:
             return zero_signal
             
         try:
@@ -85,39 +85,40 @@ class MyPredictor(Predictor):
             J_assets = len(tickers)
             combined_signal = np.zeros((N_time, J_assets), dtype=np.float64)
             
-            # 1. Compute Base Rank Matrices for the 6 features
-            ranks_dict = {}
-            for feat in self.feature_names:
-                r = (features[feat].rank(axis=1, pct=True, method='max') - 0.5).fillna(0.0).to_numpy()
-                ranks_dict[feat] = r
-                
-                # Apply base feature directional alpha
-                combined_signal += r * self.feature_weights.get(feat, 0.0)
-                
-            # 2. Inject Regularized Interaction Blocks (Unique to 6-feature constraints)
-            for i in range(len(self.feature_names)):
-                for j in range(i + 1, len(self.feature_names)):
-                    f1, f2 = self.feature_names[i], self.feature_names[j]
-                    interact_key = f"{f1}_{f2}"
-                    
-                    if interact_key in self.interaction_weights:
-                        interact_signal = ranks_dict[f1] * ranks_dict[f2]
-                        # Remove cross-sectional market noise from interaction matrix
-                        interact_signal -= interact_signal.mean(axis=1, keepdims=True)
-                        
-                        # Blend the interaction with a regularized shrinkage factor to protect the Sharpe
-                        weight = self.interaction_weights[interact_key] * self.shrinkage
-                        combined_signal += interact_signal * weight
+            # Compute Ranks for all 6 Features
+            r0 = (features[feature_list[0]].rank(axis=1, pct=True, method='max') - 0.5).fillna(0.0).to_numpy()
+            r1 = (features[feature_list[1]].rank(axis=1, pct=True, method='max') - 0.5).fillna(0.0).to_numpy()
+            r2 = (features[feature_list[2]].rank(axis=1, pct=True, method='max') - 0.5).fillna(0.0).to_numpy()
+            r3 = (features[feature_list[3]].rank(axis=1, pct=True, method='max') - 0.5).fillna(0.0).to_numpy()
+            r4 = (features[feature_list[4]].rank(axis=1, pct=True, method='max') - 0.5).fillna(0.0).to_numpy()
+            r5 = (features[feature_list[5]].rank(axis=1, pct=True, method='max') - 0.5).fillna(0.0).to_numpy()
+            
+            # Add base alpha
+            combined_signal += r0 * self.feature_weights[0]
+            combined_signal += r1 * self.feature_weights[1]
+            combined_signal += r2 * self.feature_weights[2]
+            combined_signal += r3 * self.feature_weights[3]
+            combined_signal += r4 * self.feature_weights[4]
+            combined_signal += r5 * self.feature_weights[5]
+            
+            # Compute all 15 Inter-Feature pairs with shrinkage
+            r_all = [r0, r1, r2, r3, r4, r5]
+            idx = 0
+            for i in range(6):
+                for j in range(i + 1, 6):
+                    interact_signal = r_all[i] * r_all[j]
+                    interact_signal -= interact_signal.mean(axis=1, keepdims=True)
+                    combined_signal += interact_signal * (self.interaction_weights[idx] * self.shrinkage)
+                    idx += 1
 
-            # 3. Geometric Subspace Neutralization
+            # Dollar neutralization
             combined_signal -= combined_signal.mean(axis=1, keepdims=True)
             norms = np.linalg.norm(combined_signal, axis=1, keepdims=True)
             norms[norms < 1e-10] = 1.0
             target_positions = (combined_signal / norms) * self.alpha_scale
             
-            # 4. Sequential Portfolio Smoother (Friction Mitigation)
+            # Dynamic smoother to mitigate trading friction 
             final_positions = np.zeros_like(target_positions)
-            
             if (
                 self.prev_signal is not None 
                 and self.prev_tickers is not None 
@@ -129,17 +130,15 @@ class MyPredictor(Predictor):
                 active_position = np.zeros(J_assets, dtype=np.float64)
                 
             for t in range(N_time):
-                # Exponential blending avoids execution latency while maintaining robust turnover safety
                 active_position = (self.smoothing_factor * target_positions[t]) + ((1.0 - self.smoothing_factor) * active_position)
-                active_position -= active_position.mean()  # Re-enforce pure dollar neutrality
+                active_position -= active_position.mean()
                 final_positions[t] = active_position
                 
-            # 5. Outlier Truncation & Post-Processing Compliance
+            # Formatting and final constraint compliance
             final_df = pd.DataFrame(final_positions, index=features.index, columns=tickers)
             final_df = final_df.clip(-self.target_bound, self.target_bound)
             final_df = final_df.sub(final_df.mean(axis=1), axis=0)
             
-            # Persist state snapshots for subsequent streaming ticks
             self.prev_signal = final_df.iloc[-1].to_numpy(dtype=np.float64)
             self.prev_tickers = final_df.columns.copy()
             
