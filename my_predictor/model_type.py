@@ -12,7 +12,7 @@ from predictor import Predictor
 
 class MyPredictor(Predictor):
     """
-    AlphaNova Season 1 - Third Approach
+    AlphaNova Season 1 Cycle 4 - Cross Sectional Approach
     Quantile Transform + Power Non-linearity 
     + Exact L1 Projection + Slow Decay
     """
@@ -24,10 +24,10 @@ class MyPredictor(Predictor):
         self.prev_tickers = None
 
         # Parameters
-        self.power = 1.45              # non-linearity strength
-        self.l1_target = 0.28          # exact L1 norm target
-        self.decay = 0.95              # slow decay factor
-        self.clip_bound = 0.15
+        self.power = 1.15              # non-linearity strength
+        self.l1_target = 0.25          # exact L1 norm target
+        self.decay = 0.80              # slow decay factor
+        self.clip_bound = 0.20
 
     def train(self, features: pd.DataFrame, target: pd.DataFrame = None) -> None:
         if features is not None and not features.empty:
@@ -45,7 +45,7 @@ class MyPredictor(Predictor):
         zero = pd.DataFrame(0.0, index=getattr(features, "index", []), columns=tickers, dtype=np.float32)
 
         if (features is None or features.empty or 
-            self.feature_names is None or len(self.feature_names) < 0.5):
+            self.feature_names is None or len(self.feature_names) < 1):
             return zero
 
         try:
@@ -78,7 +78,7 @@ class MyPredictor(Predictor):
             # -------------------------------------------------
             # 3. Exact L1 projection
             # -------------------------------------------------
-            l1 = np.sum(np.abs(signal), axis=1, keepdims=True) + 1e-10
+            l1 = np.sum(np.abs(signal), axis=1, keepdims=True) + 1e-12
             signal = signal * (self.l1_target / l1)
 
             # -------------------------------------------------
