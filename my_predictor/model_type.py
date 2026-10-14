@@ -12,9 +12,9 @@ from predictor import Predictor
 
 class MyPredictor(Predictor):
     """
-    AlphaNova Season 1 - Refined Fourth Approach
+    AlphaNova Season 1 Cycle 4 - Refined Fourth Approach
     Extreme-Tail Asymmetry + Controlled Sparsity
-    Target: Push Sharpe from -0.0163 into positive territory
+    Target: Push Sharpe from -0.0074 into positive territory
     """
 
     def __init__(self):
@@ -24,11 +24,11 @@ class MyPredictor(Predictor):
         self.prev_tickers = None
 
         # Tuned parameters
-        self.tail_threshold = 0.22      # slightly wider tails
-        self.sparsity_power = 1.45      # less aggressive sparsity
-        self.l1_target = 0.26
-        self.decay = 0.90
-        self.clip_bound = 0.23
+        self.tail_threshold = 0.20      # slightly wider tails
+        self.sparsity_power = 1.15      # less aggressive sparsity
+        self.l1_target = 0.28
+        self.decay = 0.80
+        self.clip_bound = 0.20
 
     def train(self, features: pd.DataFrame, target: pd.DataFrame = None) -> None:
         if features is not None and not features.empty:
@@ -46,7 +46,7 @@ class MyPredictor(Predictor):
         zero = pd.DataFrame(0.0, index=getattr(features, "index", []), columns=tickers, dtype=np.float32)
 
         if (features is None or features.empty or 
-            self.feature_names is None or len(self.feature_names) < 1):
+            self.feature_names is None or len(self.feature_names) < 2):
             return zero
 
         try:
@@ -76,7 +76,7 @@ class MyPredictor(Predictor):
 
             # 4. Demean + L1 projection
             raw = raw - raw.mean(axis=1, keepdims=True)
-            l1 = np.sum(np.abs(raw), axis=1, keepdims=True) + 1e-8
+            l1 = np.sum(np.abs(raw), axis=1, keepdims=True) + 1e-12
             signal = raw * (self.l1_target / l1)
 
             # 5. Temporal decay
