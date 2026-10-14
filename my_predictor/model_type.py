@@ -12,9 +12,8 @@ from predictor import Predictor
 
 class MyPredictor(Predictor):
     """
-    Production-Grade Quant Strategy for AlphaNova
-    Cross-Sectional Non-Linear Phase-Shift Expansion + 
-    Spherical Projection + L1 Turnover Hysteresis
+    AlphaNova Production Strategy
+    Cross-Sectional Rank → Non-Linear Expansion → Spherical Projection → L1 Hysteresis
     """
 
     def __init__(self):
@@ -23,12 +22,13 @@ class MyPredictor(Predictor):
         self.prev_signal = None
         self.prev_tickers = None
 
-        self.target_bound = 1.35
-        self.optimal_concentration = 0.25
-        self.decay = 0.92
-        self.l1_hysteresis_threshold = 1.12
+        # Small focused changes
+        self.target_bound = 0.19
+        self.optimal_concentration = 0.28      # slightly higher concentration
+        self.l1_hysteresis_threshold = 0.95    # tighter hysteresis band
+        self.smoothing = 0.85                  # slightly more weight on previous position
 
-    def train(self, features: pd.DataFrame, target=None) -> None:
+    def train(self, features: pd.DataFrame, target: pd.DataFrame = None) -> None:
         if features is not None and not features.empty:
             try:
                 self.feature_names = list(features.columns.get_level_values(0).unique())
@@ -36,15 +36,12 @@ class MyPredictor(Predictor):
                 self.feature_names = None
 
     def predict(self, features: pd.DataFrame) -> pd.DataFrame:
-        # Safe ticker extraction
         try:
             tickers = features.columns.get_level_values(1).unique()
         except Exception:
             tickers = pd.Index([])
 
-        zero_signal = pd.DataFrame(
-            0.0, index=getattr(features, "index", []), columns=tickers, dtype=np.float32
-        )
+        zero_signal = pd.DataFrame(0.0, index=getattr(features, "index", []), columns=tickers, dtype=np.float32)
 
         if (features is None or features.empty or 
             self.feature_names is None or len(self.feature_names) < 2):
@@ -71,6 +68,7 @@ class MyPredictor(Predictor):
 
             for i, f1 in enumerate(feat_list):
                 interaction_blocks.append(np.tanh(ranks[f1] * 2.0))
+
                 for j in range(i + 1, len(feat_list)):
                     f2 = feat_list[j]
                     interaction_blocks.append(
@@ -80,8 +78,9 @@ class MyPredictor(Predictor):
 
             raw_velocity = np.mean(interaction_blocks, axis=0)
 
-            # 3. Demean + Spherical projection
+            # 3. Geometric demean + Spherical projection
             velocity_demeaned = raw_velocity - raw_velocity.mean(axis=1, keepdims=True)
+
             norms = np.linalg.norm(velocity_demeaned, axis=1, keepdims=True)
             norms = np.maximum(norms, 1e-8)
             sphere_target = (velocity_demeaned / norms) * self.optimal_concentration
@@ -104,7 +103,7 @@ class MyPredictor(Predictor):
                 if l1_delta < self.l1_hysteresis_threshold:
                     current = active_position.copy()
                 else:
-                    current = 0.20 * target_position + 0.80 * active_position
+                    current = (1.0 - self.smoothing) * target_position + self.smoothing * active_position
                     current -= current.mean()
 
                 final_positions[t] = current
@@ -116,7 +115,6 @@ class MyPredictor(Predictor):
             final_df = final_df.clip(-self.target_bound, self.target_bound)
             final_df = final_df.sub(final_df.mean(axis=1), axis=0)
 
-            # Store state safely
             self.prev_signal = final_df.iloc[-1].to_numpy(dtype=np.float64)
             self.prev_tickers = list(final_df.columns)
 
