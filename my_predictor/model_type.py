@@ -24,10 +24,10 @@ class MyPredictor(Predictor):
         self.prev_tickers = None
 
         # Parameters
-        self.power = 1.35              # non-linearity strength
-        self.l1_target = 0.15          # exact L1 norm target
-        self.decay = 0.80              # slow decay factor
-        self.clip_bound = 0.20
+        self.power = 1.45              # non-linearity strength
+        self.l1_target = 0.28          # exact L1 norm target
+        self.decay = 0.95              # slow decay factor
+        self.clip_bound = 0.15
 
     def train(self, features: pd.DataFrame, target: pd.DataFrame = None) -> None:
         if features is not None and not features.empty:
@@ -45,7 +45,7 @@ class MyPredictor(Predictor):
         zero = pd.DataFrame(0.0, index=getattr(features, "index", []), columns=tickers, dtype=np.float32)
 
         if (features is None or features.empty or 
-            self.feature_names is None or len(self.feature_names) < 2):
+            self.feature_names is None or len(self.feature_names) < 0.5):
             return zero
 
         try:
@@ -78,7 +78,7 @@ class MyPredictor(Predictor):
             # -------------------------------------------------
             # 3. Exact L1 projection
             # -------------------------------------------------
-            l1 = np.sum(np.abs(signal), axis=1, keepdims=True) + 1e-8
+            l1 = np.sum(np.abs(signal), axis=1, keepdims=True) + 1e-10
             signal = signal * (self.l1_target / l1)
 
             # -------------------------------------------------
