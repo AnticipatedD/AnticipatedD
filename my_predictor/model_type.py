@@ -12,8 +12,8 @@ from predictor import Predictor
 
 class MyPredictor(Predictor):
     """
-    Asymmetric Rank-Difference & Product Engine
-    Designed for high City / Global novelty while improving stability
+    Sign-Decoupled Orthogonal Alpha Engine
+    Preserves high City / Global Novelty while improving stability and Sharpe
     """
 
     def __init__(self):
@@ -22,19 +22,17 @@ class MyPredictor(Predictor):
         self.prev_signal = None
         self.prev_tickers = None
 
-        self.target_concentration = 0.24
-        self.ema_alpha = 0.15          # slightly stronger smoothing
-        self.clip_bound = 0.22
+        self.target_bound = 0.18
+        self.optimal_concentration = 0.26
+        self.l1_hysteresis_threshold = 0.95
+        self.smoothing = 0.85
 
     def train(self, features: pd.DataFrame, target=None) -> None:
         if features is not None and not features.empty:
             try:
-                names = list(features.columns.get_level_values(0).unique())
-                self.feature_names = sorted(names)[:6]
+                self.feature_names = list(features.columns.get_level_values(0).unique())[:6]
             except Exception:
                 self.feature_names = None
-        else:
-            self.feature_names = None
 
     def predict(self, features: pd.DataFrame) -> pd.DataFrame:
         try:
@@ -44,76 +42,93 @@ class MyPredictor(Predictor):
 
         zero = pd.DataFrame(0.0, index=getattr(features, "index", []), columns=tickers, dtype=np.float32)
 
-        if (
-            features is None
-            or features.empty
-            or self.feature_names is None
-            or len(self.feature_names) < 6
-        ):
+        if (features is None or features.empty or 
+            self.feature_names is None or len(self.feature_names) < 6):
             return zero
 
         try:
-            # 1. Cross-sectional ranks → [-1, 1]
-            ranks = []
+            # 1. Cross-sectional ranks
+            ranks = {}
+            for feat in self.feature_names:
+                block = features[feat].astype(np.float64)
+                r = (block.rank(axis=1, pct=True, method='average') - 0.5) * 2.0
+                ranks[feat] = r.fillna(0.0).to_numpy()
+
+            f1 = ranks[self.feature_names[0]]
+            f2 = ranks[self.feature_names[1]]
+            f3 = ranks[self.feature_names[2]]
+            f4 = ranks[self.feature_names[3]]
+            f5 = ranks[self.feature_names[4]]
+            f6 = ranks[self.feature_names[5]]
+
+            N_time, J_assets = f1.shape
+
+            # 2. Non-linear interaction blocks (novelty source)
+            blocks = []
             for name in self.feature_names:
-                block = features[name].astype(np.float64)
-                r = (block.rank(axis=1, pct=True, method="average") - 0.5) * 2.0
-                ranks.append(np.nan_to_num(r.to_numpy(), nan=0.0))
+                blocks.append(np.tanh(ranks[name] * 2.0))
 
-            f = ranks  # list of (T, J)
-            T, J = f[0].shape
+            blocks.append(np.sin(f1 * np.pi * 0.25) * np.cos(f2 * np.pi * 0.25))
+            blocks.append(f1 * np.abs(f2))
+            blocks.append(np.sin(f3 * np.pi * 0.25) * np.cos(f4 * np.pi * 0.25))
+            blocks.append(f3 * np.abs(f4))
+            blocks.append(np.arctan(f5) * np.tanh(f6))
+            blocks.append(f5 * f6 * np.sign(f1))
 
-            # 2. Asymmetric difference + product basis (novelty driver)
-            s = np.zeros((T, J), dtype=np.float64)
+            tensor = np.stack(blocks, axis=0)  # (M, T, J)
 
-            # Strong differences
-            s += 1.00 * (f[0] - f[3])
-            s += 0.70 * (f[1] - f[4])
-            s += 0.50 * (f[2] - f[5])
+            # 3. Orthogonal extraction via SVD (keeps novelty)
+            raw_velocity = np.zeros((N_time, J_assets), dtype=np.float64)
+            for t in range(N_time):
+                slice_t = tensor[:, t, :]
+                slice_t = slice_t - slice_t.mean(axis=1, keepdims=True)
+                try:
+                    _, _, vh = np.linalg.svd(slice_t, full_matrices=False)
+                    vec = vh[0]
+                    raw_velocity[t] = vec * np.sign(np.sum(vec) + 1e-12)
+                except Exception:
+                    raw_velocity[t] = slice_t.mean(axis=0)
 
-            # Selected asymmetric products
-            s += 0.40 * (f[0] * np.abs(f[5]))
-            s += 0.35 * (f[1] * f[2])
-            s += 0.30 * (np.sign(f[3]) * f[4] * f[5])
+            # 4. Demean + Spherical projection
+            velocity = raw_velocity - raw_velocity.mean(axis=1, keepdims=True)
+            norms = np.linalg.norm(velocity, axis=1, keepdims=True)
+            norms = np.maximum(norms, 1e-8)
+            sphere_target = (velocity / norms) * self.optimal_concentration
 
-            # Higher-order term
-            s += 0.25 * (f[0] * f[1] - f[2] * f[3])
+            # 5. Stronger L1 Hysteresis (Sharpe-focused)
+            final_positions = np.zeros_like(sphere_target)
 
-            # 3. Demean
-            s -= s.mean(axis=1, keepdims=True)
-
-            # 4. Scale to target concentration
-            norms = np.linalg.norm(s, axis=1, keepdims=True)
-            norms = np.maximum(norms, 1e-10)
-            signal = s / norms * self.target_concentration
-
-            # 5. Causal EMA (turnover control)
-            out = np.zeros_like(signal)
-
-            if (
-                self.prev_signal is not None
-                and self.prev_tickers is not None
-                and len(self.prev_signal) == J
-                and list(self.prev_tickers) == list(tickers)
-            ):
+            if (self.prev_signal is not None and 
+                self.prev_tickers is not None and 
+                len(self.prev_signal) == J_assets and 
+                list(self.prev_tickers) == list(tickers)):
                 active = self.prev_signal.copy()
             else:
-                active = signal[0].copy()
+                active = np.zeros(J_assets, dtype=np.float64)
 
-            for t in range(T):
-                active = self.ema_alpha * signal[t] + (1.0 - self.ema_alpha) * active
-                active -= active.mean()
-                out[t] = active
+            for t in range(N_time):
+                target = sphere_target[t]
+                delta = np.sum(np.abs(target - active))
 
-            # 6. Final cleanup
-            out -= out.mean(axis=1, keepdims=True)
-            out = np.clip(out, -self.clip_bound, self.clip_bound)
-            out = np.nan_to_num(out, nan=0.0)
+                if delta < self.l1_hysteresis_threshold:
+                    current = active.copy()
+                else:
+                    current = (1.0 - self.smoothing) * target + self.smoothing * active
+                    current -= current.mean()
 
-            self.prev_signal = out[-1].copy()
+                final_positions[t] = current
+                active = current.copy()
+
+            # 6. Final formatting
+            df = pd.DataFrame(final_positions, index=features.index, columns=tickers)
+            df = df.sub(df.mean(axis=1), axis=0)
+            df = df.clip(-self.target_bound, self.target_bound)
+            df = df.sub(df.mean(axis=1), axis=0)
+
+            self.prev_signal = df.iloc[-1].to_numpy(dtype=np.float64)
             self.prev_tickers = list(tickers)
 
-            return pd.DataFrame(out.astype(np.float32), index=features.index, columns=tickers)
+            return df.astype(np.float32)
 
         except Exception:
             return zero
