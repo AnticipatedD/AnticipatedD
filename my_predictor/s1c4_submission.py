@@ -12,22 +12,22 @@ from predictor import Predictor
 
 class MyPredictor(Predictor):
     """
-    AlphaNova Season 1 - Refined Production Strategy
-    Best current approach: Cross-Sectional Rank → Non-Linear Expansion 
-    → Spherical Projection → L1 Hysteresis
+    AlphaNova Season 1 - New Approach
+    Robust Cross-Sectional Z-Score Ensemble 
+    + Inverse-Volatility Scaling 
+    + Soft Exponential Smoothing
     """
 
     def __init__(self):
         super().__init__()
         self.feature_names = None
-        self.prev_signal = None
+        self.prev_position = None
         self.prev_tickers = None
 
-        # Tunable parameters (keep close to your best settings)
-        self.target_bound = 0.20
-        self.optimal_concentration = 0.28
-        self.l1_hysteresis_threshold = 1.12
-        self.smoothing = 0.80          # how much previous position to keep
+        # Parameters
+        self.ema_alpha = 0.35          # light temporal smoothing
+        self.target_vol = 0.18         # target cross-sectional volatility
+        self.clip_bound = 0.22
 
     def train(self, features: pd.DataFrame, target: pd.DataFrame = None) -> None:
         if features is not None and not features.empty:
@@ -37,113 +37,80 @@ class MyPredictor(Predictor):
                 self.feature_names = None
 
     def predict(self, features: pd.DataFrame) -> pd.DataFrame:
-        # Always prepare a safe zero signal first
         try:
             tickers = features.columns.get_level_values(1).unique()
         except Exception:
             tickers = pd.Index([])
 
-        zero_signal = pd.DataFrame(
-            0.0, 
-            index=features.index if features is not None else [], 
-            columns=tickers, 
-            dtype=np.float32
-        )
+        zero = pd.DataFrame(0.0, index=getattr(features, "index", []), columns=tickers, dtype=np.float32)
 
         if (features is None or features.empty or 
-            self.feature_names is None or len(self.feature_names) < 2):
-            return zero_signal
+            self.feature_names is None or len(self.feature_names) < 1):
+            return zero
 
         try:
             # -------------------------------------------------
-            # 1. Cross-sectional rank transform (vectorized)
+            # 1. Robust cross-sectional z-score for every feature
             # -------------------------------------------------
-            ranks = {}
+            z_list = []
             for feat in self.feature_names:
                 if feat not in features.columns.get_level_values(0):
                     continue
                 block = features[feat].astype(np.float64)
-                r = (block.rank(axis=1, pct=True, method="average") - 0.5) * 2.0
-                ranks[feat] = r.fillna(0.0).to_numpy()
+                
+                # Robust z-score (median + MAD)
+                med = block.median(axis=1)
+                mad = (block.sub(med, axis=0)).abs().median(axis=1) + 1e-8
+                z = block.sub(med, axis=0).div(mad * 1.4826, axis=0)
+                z = z.fillna(0.0).clip(-4.0, 4.0)
+                z_list.append(z.to_numpy())
 
-            if len(ranks) < 2:
-                return zero_signal
+            if len(z_list) == 0:
+                return zero
 
-            N_time, J_assets = next(iter(ranks.values())).shape
-
-            # -------------------------------------------------
-            # 2. Non-linear spatial expansion
-            # -------------------------------------------------
-            interaction_blocks = []
-
-            feat_list = list(ranks.keys())
-            for i, f1 in enumerate(feat_list):
-                interaction_blocks.append(np.tanh(ranks[f1] * 2.0))
-
-                for j in range(i + 1, len(feat_list)):
-                    f2 = feat_list[j]
-                    interaction_blocks.append(
-                        np.sin(ranks[f1] * np.pi * 0.25) * np.cos(ranks[f2] * np.pi * 0.25)
-                    )
-                    interaction_blocks.append(ranks[f1] * np.abs(ranks[f2]))
-
-            raw_velocity = np.mean(interaction_blocks, axis=0)
+            # Average all feature z-scores
+            raw = np.mean(z_list, axis=0)          # shape (T, J)
 
             # -------------------------------------------------
-            # 3. Geometric demean + spherical projection
+            # 2. Inverse-volatility scaling (target specific vol)
             # -------------------------------------------------
-            velocity_demeaned = raw_velocity - raw_velocity.mean(axis=1, keepdims=True)
-
-            norms = np.linalg.norm(velocity_demeaned, axis=1, keepdims=True)
-            norms = np.maximum(norms, 1e-10)
-            sphere_target = (velocity_demeaned / norms) * self.optimal_concentration
+            cs_vol = np.std(raw, axis=1, keepdims=True) + 1e-8
+            scaled = raw * (self.target_vol / cs_vol)
 
             # -------------------------------------------------
-            # 4. L1 Causal Hysteresis (Turnover control)
+            # 3. Soft exponential moving average (temporal)
             # -------------------------------------------------
-            final_positions = np.zeros_like(sphere_target)
+            T, J = scaled.shape
+            out = np.zeros_like(scaled)
 
-            # Initialize previous position safely
-            if (self.prev_signal is not None and 
+            if (self.prev_position is not None and 
                 self.prev_tickers is not None and 
-                len(self.prev_signal) == J_assets and
+                len(self.prev_position) == J and 
                 self.prev_tickers.equals(tickers)):
-                active_position = self.prev_signal.copy()
+                prev = self.prev_position.copy()
             else:
-                active_position = np.zeros(J_assets, dtype=np.float64)
+                prev = np.zeros(J)
 
-            for t in range(N_time):
-                target_pos = sphere_target[t]
-                delta = np.sum(np.abs(target_pos - active_position))
-
-                if delta < self.l1_hysteresis_threshold:
-                    current = active_position.copy()
-                else:
-                    current = (1.0 - self.smoothing) * target_pos + self.smoothing * active_position
-                    current -= current.mean()
-
-                final_positions[t] = current
-                active_position = current.copy()
+            for t in range(T):
+                current = self.ema_alpha * scaled[t] + (1.0 - self.ema_alpha) * prev
+                current -= current.mean()          # strict demean
+                out[t] = current
+                prev = current.copy()
 
             # -------------------------------------------------
-            # 5. Final compliance formatting
+            # 4. Final formatting
             # -------------------------------------------------
-            final_df = pd.DataFrame(final_positions, index=features.index, columns=tickers)
+            df = pd.DataFrame(out, index=features.index, columns=tickers)
+            df = df.clip(-self.clip_bound, self.clip_bound)
+            df = df.sub(df.mean(axis=1), axis=0)   # final demean
 
-            # Double demean + clip for safety
-            final_df = final_df.sub(final_df.mean(axis=1), axis=0)
-            final_df = final_df.clip(-self.target_bound, self.target_bound)
-            final_df = final_df.sub(final_df.mean(axis=1), axis=0)
+            # Store state
+            self.prev_position = df.iloc[-1].to_numpy(dtype=np.float64)
+            self.prev_tickers = df.columns.copy()
 
-            # Store state for next call
-            self.prev_signal = final_df.iloc[-1].to_numpy(dtype=np.float64)
-            self.prev_tickers = final_df.columns.copy()
-
-            return final_df.astype(np.float32)
+            return df.astype(np.float32)
 
         except Exception:
-            return zero_signal
-
-
-# Required by the platform
+            return zero
+            
 predictor = MyPredictor()
