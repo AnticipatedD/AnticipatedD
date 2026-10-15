@@ -22,8 +22,7 @@ class MyPredictor(Predictor):
         
         # Hyperparameters tuned to meet target metrics
         self.target_bound = 1.35
-        self.optimal_concentration = 0.25  # Target concentration within [0.1, 0.5]
-        self.decay = 0.93
+        self.optimal_concentration = 0.28  # Target concentration within [0.1, 0.5]
         self.l1_hysteresis_threshold = 1.12  # Strict L1 turnover protection buffer
 
     def train(self, features: pd.DataFrame, target: pd.DataFrame) -> None:
