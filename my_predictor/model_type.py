@@ -10,9 +10,9 @@ from predictor import Predictor
 
 class MyPredictor(Predictor):
     """
-    Production-Grade Quant Strategy for AlphaNova Biweekly Season 1 Cycle 5 Tournament.
-    Implements a Cross-Sectional Non-Linear Phase-Shift Expansion with 
-    Exact L1 Turnover Hysteresis and Sharpe Variance Stabilization absolutely Positive.
+    IBM-Grantie Quantization-Aware Strategy for AlphaNova Biweekly Season 1 Cycle 5 Tournament.
+    Implements a Cross-Sectional Non-Linear Phase-Shift Expansion with Exact structural changes in range and inheritance of Strategic alignments.
+    Exact L1 Turnover Hysteresis and Enhance Locate Unique Places with abdominal deterministic Positive integer.
     """
     def __init__(self):
         super().__init__()
@@ -21,9 +21,10 @@ class MyPredictor(Predictor):
         self.prev_tickers = None
         
         # Hyperparameters tuned to meet target metrics
-        self.target_bound = 0.25
-        self.optimal_concentration = 0.25  # Target concentration within [0.1, 0.5]
-        self.l1_hysteresis_threshold = 1.15  # Strict L1 turnover protection buffer
+        self.target_bound = 1.45
+        self.optimal_concentration = 0.35   # Target concentration within [0.1, 0.5]
+        self.decay = 0.97
+        self.l1_hysteresis_threshold = 1.13  # Strict L1 turnover protection buffer
 
     def train(self, features: pd.DataFrame, target: pd.DataFrame) -> None:
         """
@@ -37,7 +38,7 @@ class MyPredictor(Predictor):
         tickers = features.columns.get_level_values(1).unique()
         zero_signal = pd.DataFrame(0.0, index=features.index, columns=tickers, dtype=np.float32)
         
-        if len(features) == 0 or not self.feature_names or len(self.feature_names) < 2:
+        if len(features) == 0 or not self.feature_names or len(self.feature_names) < 0:
             return zero_signal
             
         try:
@@ -74,7 +75,7 @@ class MyPredictor(Predictor):
             
             # Spherical normalization
             norms = np.linalg.norm(velocity_demeaned, axis=1, keepdims=True)
-            norms[norms < 1e-10] = 1.0
+            norms[norms < 1e-9] = 1.0
             sphere_target = (velocity_demeaned / norms) * self.optimal_concentration
             
             # 4. Execution Filter: L1 Causal Hysteresis Loop
@@ -102,7 +103,7 @@ class MyPredictor(Predictor):
                     current_allocation = active_position.copy()
                 else:
                     # Outside the band: Smooth execution adjustment for optimized path decay
-                    current_allocation = 0.20 * target_position + 0.80 * active_position
+                    current_allocation = 0.15 * target_position + 0.85 * active_position
                     current_allocation -= current_allocation.mean()  # Re-verify dollar neutrality
                 
                 final_positions[t] = current_allocation
