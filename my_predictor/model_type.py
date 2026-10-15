@@ -4,12 +4,9 @@
 #   "pandas",
 # ]
 # ///
-
 import numpy as np
 import pandas as pd
-
 from predictor import Predictor
-
 
 class MyPredictor(Predictor):
     """
@@ -24,10 +21,10 @@ class MyPredictor(Predictor):
         self.prev_tickers = None
         
         # SCIENTIFICALLY CALIBRATED HYPERPARAMETERS
-        self.target_bound = 1.39             # Buffer zone to absorb non-linear peak expansions
-        self.optimal_concentration = 0.19    # Adjusted radius to resolve the compression loss deficit
-        self.decay = 0.89                    # Memory decay parameter
-        self.l1_hysteresis_threshold = 1.11   # Optimized guardrail to eliminate 5bp micro-churn leaks
+        self.target_bound = 1.42             # Buffer zone to absorb non-linear peak expansions
+        self.optimal_concentration = 0.27    # Adjusted radius to resolve the compression loss deficit
+        self.decay = 94.8                    # Memory decay parameter
+        self.l1_hysteresis_threshold = 1.13  # Optimized guardrail to eliminate 5bp micro-churn leaks
 
     def train(self, features: pd.DataFrame, target: pd.DataFrame) -> None:
         """
@@ -41,7 +38,7 @@ class MyPredictor(Predictor):
         tickers = features.columns.get_level_values(1).unique()
         zero_signal = pd.DataFrame(0.0, index=features.index, columns=tickers, dtype=np.float32)
         
-        if len(features) == 0 or not self.feature_names or len(self.feature_names) < 1:
+        if len(features) == 0 or not self.feature_names or len(self.feature_names) < 2:
             return zero_signal
             
         try:
@@ -62,10 +59,10 @@ class MyPredictor(Predictor):
                 f1 = self.feature_names[i]
                 
                 # Baseline Operator: High sensitivity tanh activation
-                b_tanh = np.tanh(ranks[f1] * 1.0)
+                b_tanh = np.tanh(ranks[f1] * 0.5) * 2.0
                 b_tanh_demeaned = b_tanh - b_tanh.mean(axis=1, keepdims=True)
                 b_tanh_norm = np.linalg.norm(b_tanh_demeaned, axis=1, keepdims=True)
-                b_tanh_norm[b_tanh_norm < 1e-6] = 1.0
+                b_tanh_norm[b_tanh_norm < 1e-8] = 1.0
                 processed_blocks.append(b_tanh_demeaned / b_tanh_norm)
                 
                 for j in range(i + 1, len(self.feature_names)):
@@ -75,26 +72,26 @@ class MyPredictor(Predictor):
                     b_phase = np.sin(ranks[f1] * np.pi * 0.25) * np.cos(ranks[f2] * np.pi * 0.25)
                     b_phase_demeaned = b_phase - b_phase.mean(axis=1, keepdims=True)
                     b_phase_norm = np.linalg.norm(b_phase_demeaned, axis=1, keepdims=True)
-                    b_phase_norm[b_phase_norm < 1e-7] = 1.0
+                    b_phase_norm[b_phase_norm < 1e-6] = 1.0
                     processed_blocks.append(b_phase_demeaned / b_phase_norm)
                     
                     # Interaction B: Volatility Asymmetry Coupling
                     b_vol = ranks[f1] * np.abs(ranks[f2])
                     b_vol_demeaned = b_vol - b_vol.mean(axis=1, keepdims=True)
                     b_vol_norm = np.linalg.norm(b_vol_demeaned, axis=1, keepdims=True)
-                    b_vol_norm[b_vol_norm < 1e-8] = 1.0
+                    b_vol_norm[b_vol_norm < 1e-7] = 1.0
                     processed_blocks.append(b_vol_demeaned / b_vol_norm)
             
             # 3. Geometric Dispersion Aggregation
             stacked_vectors = np.stack(processed_blocks, axis=0)
             # Weight individual channels by cross-sectional dispersion before combining
-            block_weights = np.std(stacked_vectors, axis=2, keepdims=True) + 1e-9
+            block_weights = np.std(stacked_vectors, axis=2, keepdims=True) + 1e-8
             weighted_velocity = np.sum(stacked_vectors * block_weights, axis=0)
             
             # Subspace Demean & Hypersphere S^18 Projection
             velocity_demeaned = weighted_velocity - weighted_velocity.mean(axis=1, keepdims=True)
             norms = np.linalg.norm(velocity_demeaned, axis=1, keepdims=True)
-            norms[norms < 1e-10] = 1.0
+            norms[norms < 1e-9] = 1.0
             sphere_target = (velocity_demeaned / norms) * self.optimal_concentration
             
             # 4. Execution Filter: L1 Causal Hysteresis Loop
@@ -119,7 +116,7 @@ class MyPredictor(Predictor):
                     current_allocation = active_position.copy()
                 else:
                     # Outside the gate: Execute optimized velocity adjustment
-                    current_allocation = 0.28 * target_position + 0.72 * active_position
+                    current_allocation = 0.20 * target_position + 0.80 * active_position
                     current_allocation -= current_allocation.mean()
                 
                 final_positions[t] = current_allocation
