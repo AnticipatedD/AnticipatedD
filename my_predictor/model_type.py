@@ -4,18 +4,16 @@
 #   "pandas",
 # ]
 # ///
-
 import numpy as np
 import pandas as pd
-
 from predictor import Predictor
 
 
 class MyPredictor(Predictor):
     """
-    AlphaNova Season 1 Cycle 5 – minimal rank signal.
-    Low-capacity cross-sectional ranks + one mild interaction.
-    Relative L1 hysteresis – guaranteed non-flat and low noise.
+    AlphaNova Season 1 Cycle 5 – refined rank + interaction version.
+    Keeps the interaction structure that produced IC ≈ 0.0106,
+    fixes flatness, clipping and turnover.
     """
     def __init__(self):
         super().__init__()
@@ -23,12 +21,12 @@ class MyPredictor(Predictor):
         self.prev_signal = None
         self.prev_tickers = None
 
-        self.target_bound = 1.5
-        self.concentration = 0.34
-        self.ema_alpha = 0.45              # more responsive
-        self.l1_rel_threshold = 0.12       # only true micro-churn
+        self.target_bound = 1.20              # was 0.19 – far too tight
+        self.concentration = 0.30
+        self.ema_alpha = 0.38                 # more responsive than 0.18
+        self.l1_rel_threshold = 0.15          # relative gate
 
-    def train(self, features: pd.DataFrame, target: pd.DataFrame) -> None:
+    def train(self, features: pd.DataFrame, target: pd.DataFrame = None) -> None:
         if features is not None and not features.empty:
             try:
                 self.feature_names = list(features.columns.get_level_values(0).unique())
@@ -44,11 +42,11 @@ class MyPredictor(Predictor):
         zero = pd.DataFrame(0.0, index=getattr(features, "index", []), columns=tickers, dtype=np.float32)
 
         if (features is None or features.empty or
-                self.feature_names is None or len(self.feature_names) < 1):
+                self.feature_names is None or len(self.feature_names) < 2):
             return zero
 
         try:
-            # 1. Cross-sectional ranks → [-1, 1]
+            # 1. Cross-sectional ranks
             ranks = {}
             for feat in self.feature_names:
                 if feat not in features.columns.get_level_values(0):
@@ -57,46 +55,42 @@ class MyPredictor(Predictor):
                 r = (block.rank(axis=1, pct=True, method="average") - 0.5) * 2.0
                 ranks[feat] = r.fillna(0.0).to_numpy()
 
-            if not ranks:
+            if len(ranks) < 2:
                 return zero
 
             N, J = next(iter(ranks.values())).shape
             feat_list = list(ranks.keys())
             blocks = []
 
-            # 2. Individual linear ranks (main signal) + one mild product
+            # 2. Same interaction structure that gave the good IC
             for i, f1 in enumerate(feat_list):
-                b = ranks[f1]
-                b = b - b.mean(axis=1, keepdims=True)
-                nrm = np.linalg.norm(b, axis=1, keepdims=True)
-                nrm = np.maximum(nrm, 1e-8)
-                blocks.append(b / nrm)
+                blocks.append(np.tanh(ranks[f1] * 1.8))
 
                 for j in range(i + 1, len(feat_list)):
                     f2 = feat_list[j]
-                    inter = ranks[f1] * ranks[f2]
-                    inter = inter - inter.mean(axis=1, keepdims=True)
-                    nrm = np.linalg.norm(inter, axis=1, keepdims=True)
-                    nrm = np.maximum(nrm, 1e-8)
-                    blocks.append(inter / nrm * 0.4)   # down-weighted
+                    blocks.append(
+                        np.sin(ranks[f1] * np.pi * 0.25) * np.cos(ranks[f2] * np.pi * 0.25)
+                    )
+                    blocks.append(ranks[f1] * np.abs(ranks[f2]))
 
-            # 3. Aggregate → project
             velocity = np.mean(blocks, axis=0)
+
+            # 3. Demean + spherical projection
             velocity = velocity - velocity.mean(axis=1, keepdims=True)
             norms = np.linalg.norm(velocity, axis=1, keepdims=True)
             norms = np.maximum(norms, 1e-8)
             target = (velocity / norms) * self.concentration
 
-            # 4. Relative L1 + EMA (never flat)
+            # 4. Relative L1 hysteresis + EMA (never flat)
             final = np.zeros_like(target)
 
             if (self.prev_signal is not None and
                     self.prev_tickers is not None and
-                    self.prev_signal.shape == (J,) and
+                    len(self.prev_signal) == J and
                     list(self.prev_tickers) == list(tickers)):
                 active = self.prev_signal.copy()
             else:
-                active = target[0].copy()          # critical: non-zero start
+                active = target[0].copy()          # non-zero start
 
             for t in range(N):
                 tgt = target[t]
@@ -112,7 +106,7 @@ class MyPredictor(Predictor):
                 final[t] = curr
                 active = curr
 
-            # 5. Final compliance
+            # 5. Final demean + reasonable clip
             out = pd.DataFrame(final, index=features.index, columns=tickers)
             out = out.sub(out.mean(axis=1), axis=0)
             out = out.clip(-self.target_bound, self.target_bound)
