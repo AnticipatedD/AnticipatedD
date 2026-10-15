@@ -21,9 +21,9 @@ class MyPredictor(Predictor):
         self.prev_tickers = None
         
         # Hyperparameters tuned to meet target metrics
-        self.target_bound = 1.34
-        self.optimal_concentration = 0.17  # Target concentration within [0.1, 0.5]
-        self.l1_hysteresis_threshold = 1.19  # Strict L1 turnover protection buffer
+        self.target_bound = 0.35
+        self.optimal_concentration = 0.28  # Target concentration within [0.1, 0.5]
+        self.l1_hysteresis_threshold = 1.12  # Strict L1 turnover protection buffer
 
     def train(self, features: pd.DataFrame, target: pd.DataFrame) -> None:
         """
@@ -37,7 +37,7 @@ class MyPredictor(Predictor):
         tickers = features.columns.get_level_values(1).unique()
         zero_signal = pd.DataFrame(0.0, index=features.index, columns=tickers, dtype=np.float32)
         
-        if len(features) == 0 or not self.feature_names or len(self.feature_names) < 0:
+        if len(features) == 0 or not self.feature_names or len(self.feature_names) < 2:
             return zero_signal
             
         try:
@@ -74,7 +74,7 @@ class MyPredictor(Predictor):
             
             # Spherical normalization
             norms = np.linalg.norm(velocity_demeaned, axis=1, keepdims=True)
-            norms[norms < 1e-10] = 1.0
+            norms[norms < 1e-8] = 1.0
             sphere_target = (velocity_demeaned / norms) * self.optimal_concentration
             
             # 4. Execution Filter: L1 Causal Hysteresis Loop
