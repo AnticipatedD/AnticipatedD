@@ -4,13 +4,16 @@
 #   "pandas",
 # ]
 # ///
+
 import numpy as np
 import pandas as pd
+
 from predictor import Predictor
+
 
 class MyPredictor(Predictor):
     """
-    Production-Grade Quant Strategy for AlphaNova Biweekly Season 1 Cycle 5 Tournament.
+    AlphaNova Biweekly Season 1 Cycle 5 Tournament.
     Implements Individual Cross-Sectional Block Variance Projections, 
     Orthogonal Rank Tail Sensitivity, and Causal L1 Hysteresis Trajectory Tracking.
     """
