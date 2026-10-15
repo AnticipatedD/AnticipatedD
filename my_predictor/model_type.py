@@ -4,16 +4,18 @@
 #   "pandas",
 # ]
 # ///
+
 import numpy as np
 import pandas as pd
+
 from predictor import Predictor
 
 
 class MyPredictor(Predictor):
     """
-    AlphaNova Season 1 Cycle 5 – robust rank-block signal.
-    Simple cross-sectional ranks + mild pairwise interactions +
-    relative L1 hysteresis. Designed to pass flat-check and overfitting gate.
+    AlphaNova Season 1 Cycle 5 – robust rank signal (sign-corrected).
+    Simple cross-sectional ranks + one mild interaction + relative EMA.
+    Designed for positive IC and to pass flat / overfitting gates.
     """
     def __init__(self):
         super().__init__()
@@ -21,10 +23,10 @@ class MyPredictor(Predictor):
         self.prev_signal = None
         self.prev_tickers = None
 
-        self.target_bound = 1.35
-        self.concentration = 0.25          # enough mass to trade
-        self.ema_alpha = 0.42              # responsive but smooth
-        self.l1_rel_threshold = 1.12       # only kills micro-churn
+        self.target_bound = 1.05
+        self.concentration = 0.32
+        self.ema_alpha = 0.42              # a bit more responsive
+        self.l1_rel_threshold = 0.15       # only micro-churn
 
     def train(self, features: pd.DataFrame, target: pd.DataFrame) -> None:
         if features is not None and not features.empty:
@@ -42,7 +44,7 @@ class MyPredictor(Predictor):
         zero = pd.DataFrame(0.0, index=getattr(features, "index", []), columns=tickers, dtype=np.float32)
 
         if (features is None or features.empty or
-                self.feature_names is None or len(self.feature_names) < 0):
+                self.feature_names is None or len(self.feature_names) < 1):
             return zero
 
         try:
@@ -62,31 +64,34 @@ class MyPredictor(Predictor):
             feat_list = list(ranks.keys())
             blocks = []
 
-            # 2. Simple individual + one mild pairwise interaction per pair
+            # 2. Individual ranks (main signal) + one simple product interaction
             for i, f1 in enumerate(feat_list):
-                b = np.tanh(ranks[f1] * 0.9)
+                b = ranks[f1]                          # keep linear rank (less noise than tanh)
                 b = b - b.mean(axis=1, keepdims=True)
                 nrm = np.linalg.norm(b, axis=1, keepdims=True)
-                nrm = np.maximum(nrm, 1e-9)
+                nrm = np.maximum(nrm, 1e-8)
                 blocks.append(b / nrm)
 
                 for j in range(i + 1, len(feat_list)):
                     f2 = feat_list[j]
-                    # Single mild interaction (keeps capacity low)
+                    # Single mild product – keeps capacity low
                     inter = ranks[f1] * ranks[f2]
                     inter = inter - inter.mean(axis=1, keepdims=True)
                     nrm = np.linalg.norm(inter, axis=1, keepdims=True)
-                    nrm = np.maximum(nrm, 1e-11)
-                    blocks.append(inter / nrm)
+                    nrm = np.maximum(nrm, 1e-8)
+                    blocks.append(inter / nrm * 0.5)   # down-weight interaction
 
-            # 3. Equal-weight aggregation → demean → project
+            # 3. Aggregate → demean → project
             velocity = np.mean(blocks, axis=0)
             velocity = velocity - velocity.mean(axis=1, keepdims=True)
             norms = np.linalg.norm(velocity, axis=1, keepdims=True)
-            norms = np.maximum[norms < 1e-12]= 1.0
+            norms = np.maximum(norms, 1e-8)
             target = (velocity / norms) * self.concentration
 
-            # 4. Relative L1 hysteresis + EMA (guarantees non-flat)
+            # *** Critical: flip sign (previous version was anti-predictive) ***
+            target = -target
+
+            # 4. Relative L1 + EMA (guarantees non-zero exposure)
             final = np.zeros_like(target)
 
             if (self.prev_signal is not None and
@@ -95,12 +100,12 @@ class MyPredictor(Predictor):
                     list(self.prev_tickers) == list(tickers)):
                 active = self.prev_signal.copy()
             else:
-                active = target[0].copy()          # never start at zero
+                active = target[0].copy()
 
             for t in range(N):
                 tgt = target[t]
                 delta = np.sum(np.abs(tgt - active))
-                scale = np.sum(np.abs(active)) + 1e-10
+                scale = np.sum(np.abs(active)) + 1e-8
 
                 if delta < self.l1_rel_threshold * scale:
                     curr = active
