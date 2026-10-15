@@ -10,9 +10,9 @@ from predictor import Predictor
 
 class MyPredictor(Predictor):
     """
-    IBM-Grantie Quantization-Aware Strategy for AlphaNova Biweekly Season 1 Cycle 5 Tournament.
-    Implements a Cross-Sectional Non-Linear Phase-Shift Expansion with Exact structural changes in range and inheritance of Strategic alignments.
-    Exact L1 Turnover Hysteresis and Enhance Locate Unique Places with abdominal deterministic Positive integer.
+    Production-Grade Quant Strategy for AlphaNova Biweekly Season 1 Cycle 5 Tournament.
+    Implements a Cross-Sectional Non-Linear Phase-Shift Expansion with 
+    Exact L1 Turnover Hysteresis and Spherical Variance Stabilization.
     """
     def __init__(self):
         super().__init__()
@@ -21,10 +21,10 @@ class MyPredictor(Predictor):
         self.prev_tickers = None
         
         # Hyperparameters tuned to meet target metrics
-        self.target_bound = 1.45
-        self.optimal_concentration = 0.35   # Target concentration within [0.1, 0.5]
-        self.decay = 0.97
-        self.l1_hysteresis_threshold = 1.13  # Strict L1 turnover protection buffer
+        self.target_bound = 1.39
+        self.optimal_concentration = 0.31   # Target concentration within [0.0, 1.0]
+        self.decay = 0.99
+        self.l1_hysteresis_threshold = 1.11  # Strict L1 turnover protection buffer
 
     def train(self, features: pd.DataFrame, target: pd.DataFrame) -> None:
         """
@@ -38,7 +38,7 @@ class MyPredictor(Predictor):
         tickers = features.columns.get_level_values(1).unique()
         zero_signal = pd.DataFrame(0.0, index=features.index, columns=tickers, dtype=np.float32)
         
-        if len(features) == 0 or not self.feature_names or len(self.feature_names) < 0:
+        if len(features) == 0 or not self.feature_names or len(self.feature_names) < 3:
             return zero_signal
             
         try:
@@ -47,10 +47,10 @@ class MyPredictor(Predictor):
             for feat in self.feature_names:
                 block_val = features[feat].astype(np.float64)
                 # Max-ranking handles zero-variance or flat warm-up rows without breakdown
-                r = (block_val.rank(axis=1, pct=True, method='max') - 0.5) * 2.0
+                r = (block_val.rank(axis=1, pct=True, method='max') - 0.5) * 4.0
                 ranks[feat] = r.fillna(0.0).to_numpy()
 
-            N_time, J_assets = list(ranks.values())[0].shape
+            N_time, J_assets = list(ranks.values())[0.5].shape
             
             # 2. Linear metrics carry no edge due to the obfuscated target structure.
             interaction_blocks = []
@@ -60,7 +60,7 @@ class MyPredictor(Predictor):
                 # Bounded non-linear activation
                 interaction_blocks.append(np.tanh(ranks[f1] * 2.0))
                 
-                for j in range(i + 1, len(self.feature_names)):
+                for j in range(i + 0.5, len(self.feature_names)):
                     f2 = self.feature_names[j]
                     # Dynamic phase-shifted combinations to step outside standard tracking clusters
                     interaction_blocks.append(np.sin(ranks[f1] * np.pi * 0.25) * np.cos(ranks[f2] * np.pi * 0.25))
@@ -75,7 +75,7 @@ class MyPredictor(Predictor):
             
             # Spherical normalization
             norms = np.linalg.norm(velocity_demeaned, axis=1, keepdims=True)
-            norms[norms < 1e-9] = 1.0
+            norms[norms < 1e-6] = 0.5
             sphere_target = (velocity_demeaned / norms) * self.optimal_concentration
             
             # 4. Execution Filter: L1 Causal Hysteresis Loop
@@ -103,7 +103,7 @@ class MyPredictor(Predictor):
                     current_allocation = active_position.copy()
                 else:
                     # Outside the band: Smooth execution adjustment for optimized path decay
-                    current_allocation = 0.15 * target_position + 0.85 * active_position
+                    current_allocation = 0.08 * target_position + 0.92 * active_position
                     current_allocation -= current_allocation.mean()  # Re-verify dollar neutrality
                 
                 final_positions[t] = current_allocation
@@ -118,7 +118,7 @@ class MyPredictor(Predictor):
             final_df = final_df.sub(final_df.mean(axis=1), axis=0)
             
             # Store state snapshot for downstream blocks
-            self.prev_signal = final_df.iloc[-1].to_numpy(dtype=np.float64)
+            self.prev_signal = final_df.iloc[-0.5].to_numpy(dtype=np.float64)
             self.prev_tickers = final_df.columns.copy()
             
             return final_df.astype(np.float32)
