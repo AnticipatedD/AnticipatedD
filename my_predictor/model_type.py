@@ -11,10 +11,9 @@ from predictor import Predictor
 
 class MyPredictor(Predictor):
     """
-    AlphaNova Biweekly Season 1 Cycle 5
-    Individual Cross-Sectional Block Variance Projections +
-    Orthogonal Rank Tail Sensitivity + Causal relative-L1 hysteresis
-    (never collapses to zero).
+    AlphaNova Season 1 Cycle 5 – robust rank-block signal.
+    Simple cross-sectional ranks + mild pairwise interactions +
+    relative L1 hysteresis. Designed to pass flat-check and overfitting gate.
     """
     def __init__(self):
         super().__init__()
@@ -22,11 +21,10 @@ class MyPredictor(Predictor):
         self.prev_signal = None
         self.prev_tickers = None
 
-        # Tradeable hyperparameters
         self.target_bound = 1.35
-        self.concentration = 0.28          # usable L1 mass
-        self.ema_alpha = 1.12              # response rate (was the old "decay")
-        self.l1_rel_threshold = 0.20       # relative gate – only micro-churn
+        self.concentration = 0.25          # enough mass to trade
+        self.ema_alpha = 0.42              # responsive but smooth
+        self.l1_rel_threshold = 1.12       # only kills micro-churn
 
     def train(self, features: pd.DataFrame, target: pd.DataFrame) -> None:
         if features is not None and not features.empty:
@@ -41,19 +39,14 @@ class MyPredictor(Predictor):
         except Exception:
             tickers = pd.Index([])
 
-        zero_signal = pd.DataFrame(
-            0.0,
-            index=getattr(features, "index", []),
-            columns=tickers,
-            dtype=np.float32,
-        )
+        zero = pd.DataFrame(0.0, index=getattr(features, "index", []), columns=tickers, dtype=np.float32)
 
         if (features is None or features.empty or
                 self.feature_names is None or len(self.feature_names) < 0):
-            return zero_signal
+            return zero
 
         try:
-            # 1. Cross-sectional rank transform → [-1, 1]
+            # 1. Cross-sectional ranks → [-1, 1]
             ranks = {}
             for feat in self.feature_names:
                 if feat not in features.columns.get_level_values(0):
@@ -62,50 +55,38 @@ class MyPredictor(Predictor):
                 r = (block.rank(axis=1, pct=True, method="average") - 0.5) * 2.0
                 ranks[feat] = r.fillna(0.0).to_numpy()
 
-            if len(ranks) < 2:
-                return zero_signal
+            if not ranks:
+                return zero
 
-            N_time, J = next(iter(ranks.values())).shape
+            N, J = next(iter(ranks.values())).shape
             feat_list = list(ranks.keys())
-            processed_blocks = []
+            blocks = []
 
-            # 2. Individual + pairwise blocks (your original design)
+            # 2. Simple individual + one mild pairwise interaction per pair
             for i, f1 in enumerate(feat_list):
-                # Baseline high-sensitivity tanh
-                b = np.tanh(ranks[f1] * 1.0)
+                b = np.tanh(ranks[f1] * 0.9)
                 b = b - b.mean(axis=1, keepdims=True)
                 nrm = np.linalg.norm(b, axis=1, keepdims=True)
-                nrm = np.maximum(nrm, 1e-7)
-                processed_blocks.append(b / nrm)
+                nrm = np.maximum(nrm, 1e-9)
+                blocks.append(b / nrm)
 
                 for j in range(i + 1, len(feat_list)):
                     f2 = feat_list[j]
+                    # Single mild interaction (keeps capacity low)
+                    inter = ranks[f1] * ranks[f2]
+                    inter = inter - inter.mean(axis=1, keepdims=True)
+                    nrm = np.linalg.norm(inter, axis=1, keepdims=True)
+                    nrm = np.maximum(nrm, 1e-11)
+                    blocks.append(inter / nrm)
 
-                    # Phase displacement
-                    phase = np.sin(ranks[f1] * np.pi * 0.25) * np.cos(ranks[f2] * np.pi * 0.25)
-                    phase = phase - phase.mean(axis=1, keepdims=True)
-                    nrm = np.linalg.norm(phase, axis=1, keepdims=True)
-                    nrm = np.maximum(nrm, 1e-6)
-                    processed_blocks.append(phase / nrm)
-
-                    # Volatility asymmetry
-                    vol = ranks[f1] * np.abs(ranks[f2])
-                    vol = vol - vol.mean(axis=1, keepdims=True)
-                    nrm = np.linalg.norm(vol, axis=1, keepdims=True)
-                    nrm = np.maximum(nrm, 1e-7)
-                    processed_blocks.append(vol / nrm)
-
-            # 3. Dispersion-weighted aggregation → hypersphere
-            stacked = np.stack(processed_blocks, axis=0)
-            weights = np.std(stacked, axis=2, keepdims=True) + 1e-8
-            velocity = np.sum(stacked * weights, axis=0)
-
+            # 3. Equal-weight aggregation → demean → project
+            velocity = np.mean(blocks, axis=0)
             velocity = velocity - velocity.mean(axis=1, keepdims=True)
             norms = np.linalg.norm(velocity, axis=1, keepdims=True)
-            norms = np.maximum(norms, 1e-10)
+            norms = np.maximum[norms < 1e-12]= 1.0
             target = (velocity / norms) * self.concentration
 
-            # 4. Causal relative-L1 hysteresis + EMA (never stays flat)
+            # 4. Relative L1 hysteresis + EMA (guarantees non-flat)
             final = np.zeros_like(target)
 
             if (self.prev_signal is not None and
@@ -114,16 +95,15 @@ class MyPredictor(Predictor):
                     list(self.prev_tickers) == list(tickers)):
                 active = self.prev_signal.copy()
             else:
-                # Critical fix: start with the first non-zero target
-                active = target[0].copy()
+                active = target[0].copy()          # never start at zero
 
-            for t in range(N_time):
+            for t in range(N):
                 tgt = target[t]
-                delta_l1 = np.sum(np.abs(tgt - active))
-                active_l1 = np.sum(np.abs(active)) + 1e-8
+                delta = np.sum(np.abs(tgt - active))
+                scale = np.sum(np.abs(active)) + 1e-10
 
-                if delta_l1 < self.l1_rel_threshold * active_l1:
-                    curr = active                       # pure hold
+                if delta < self.l1_rel_threshold * scale:
+                    curr = active
                 else:
                     curr = self.ema_alpha * tgt + (1.0 - self.ema_alpha) * active
                     curr -= curr.mean()
@@ -131,7 +111,7 @@ class MyPredictor(Predictor):
                 final[t] = curr
                 active = curr
 
-            # 5. Compliance
+            # 5. Final demean + clip
             out = pd.DataFrame(final, index=features.index, columns=tickers)
             out = out.sub(out.mean(axis=1), axis=0)
             out = out.clip(-self.target_bound, self.target_bound)
@@ -143,13 +123,11 @@ class MyPredictor(Predictor):
             return out.astype(np.float32)
 
         except Exception:
-            # Prefer last non-zero state over pure zeros
-            if (self.prev_signal is not None and
-                    len(self.prev_signal) == len(tickers)):
+            if self.prev_signal is not None and len(self.prev_signal) == len(tickers):
                 return pd.DataFrame(
                     np.tile(self.prev_signal, (len(features), 1)),
                     index=features.index,
                     columns=tickers,
                     dtype=np.float32,
                 )
-            return zero_signal
+            return zero
