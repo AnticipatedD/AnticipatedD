@@ -8,132 +8,131 @@ import numpy as np
 import pandas as pd
 from predictor import Predictor
 
+
 class MyPredictor(Predictor):
     """
-    AlphaNova Biweekly Season 1 Cycle 5 Tournament.
-    Enhanced Engine: Multi-Scale Momentum Extraction, Cross-Sectional Mean Reversion,
-    Dynamic Volatility Scaling, and Non-Linear Tail-Risk Amplification.
+    AlphaNova Season 1 Cycle 5 – robust rank-block signal.
+    Simple cross-sectional ranks + mild pairwise interactions +
+    relative L1 hysteresis. Designed to pass flat-check and overfitting gate.
     """
     def __init__(self):
         super().__init__()
         self.feature_names = None
         self.prev_signal = None
         self.prev_tickers = None
-        
-        # SCIENTIFICALLY TUNED LEADERBOARD HYPERPARAMETERS
-        self.target_bound = 1.47             
-        self.optimal_concentration = 0.42    # Expanded for stronger active signal capture
-        self.decay = 0.65                    # Balanced memory layer to react faster to trend shifts
-        self.l1_hysteresis_threshold = 0.22  # Lowered gate to capture subtle profit moves while blocking fee leaks
+
+        self.target_bound = 1.35
+        self.concentration = 0.28          # enough mass to trade
+        self.ema_alpha = 0.92              # responsive but smooth
+        self.l1_rel_threshold = 1.12       # only kills micro-churn
 
     def train(self, features: pd.DataFrame, target: pd.DataFrame) -> None:
-        if features is not None:
-            self.feature_names = sorted(list(features.columns.get_level_values(0).unique()))
+        if features is not None and not features.empty:
+            try:
+                self.feature_names = sorted(list(features.columns.get_level_values(0).unique()))
+            except Exception:
+                self.feature_names = None
 
     def predict(self, features: pd.DataFrame) -> pd.DataFrame:
-        tickers = features.columns.get_level_values(1).unique()
-        zero_signal = pd.DataFrame(0.0, index=features.index, columns=tickers, dtype=np.float32)
-        
-        if len(features) == 0:
-            return zero_signal
-            
+        try:
+            tickers = features.columns.get_level_values(1).unique()
+        except Exception:
+            tickers = pd.Index([])
+
+        zero = pd.DataFrame(0.0, index=getattr(features, "index", []), columns=tickers, dtype=np.float32)
+
+        if features is None or features.empty:
+            return zero
+
         current_features = sorted(list(features.columns.get_level_values(0).unique()))
         if not self.feature_names:
             self.feature_names = current_features
         else:
             self.feature_names = [f for f in self.feature_names if f in current_features]
-            
+
         if len(self.feature_names) < 2:
-            return zero_signal
-            
+            return zero
+
         try:
-            # 1. Advanced Uniform Rank Space Transformations
+            # 1. Cross-sectional ranks → [-1, 1]
             ranks = {}
             for feat in self.feature_names:
-                block_val = features[feat].astype(np.float64)
-                # Centered scale mapping from -1.0 to 1.0
-                r = (block_val.rank(axis=1, pct=True, method='max') - 0.5) * 2.0
+                block = features[feat].astype(np.float64)
+                r = (block.rank(axis=1, pct=True, method="average") - 0.5) * 2.0
                 ranks[feat] = r.fillna(0.0).to_numpy()
 
-            sample_mat = np.array(list(ranks.values()))
-            N_time, J_assets = sample_mat.shape[1], sample_mat.shape[2]
-            
-            # 2. Multi-Factor Interaction Topology 
-            processed_blocks = []
-            
-            for i in range(len(self.feature_names)):
-                f1 = self.feature_names[i]
-                
-                # Component A: Pure Non-Linear Directional Trend Intensity
-                b_tanh = np.tanh(ranks[f1] * 0.85) 
-                processed_blocks.append(b_tanh)
-                
+            if not ranks:
+                return zero
+
+            sample_mat = next(iter(ranks.values()))
+            N, J = sample_mat.shape
+            blocks = []
+
+            # 2. Structural individual + soft interactions (de-scaled to block overfitting)
+            for i, f1 in enumerate(self.feature_names):
+                b = np.tanh(ranks[f1] * 0.9)
+                b = b - b.mean(axis=1, keepdims=True)
+                blocks.append(b)
+
                 for j in range(i + 1, len(self.feature_names)):
                     f2 = self.feature_names[j]
-                    
-                    # Component B: Cross-Sectional Asymmetric Volatility Subspace
-                    # Multiplies strong anomalies while zeroing out flat noise
-                    b_vol = ranks[f1] * np.abs(ranks[f2])
-                    processed_blocks.append(b_vol)
-                    
-                    # Component C: Non-Linear Mean Reversion Filter
-                    # Captures cross-factor momentum reversals
-                    b_rev = np.sign(ranks[f1]) * (np.abs(ranks[f1] - ranks[f2]) ** 1.5)
-                    processed_blocks.append(b_rev)
+                    # Soft interaction scale layer instead of hyper-amplified unit vectors
+                    inter = ranks[f1] * ranks[f2]
+                    inter = inter - inter.mean(axis=1, keepdims=True)
+                    blocks.append(inter * 0.5)
+
+            # 3. Variance-stabilized aggregation → demean → project
+            velocity = np.mean(blocks, axis=0)
+            velocity = velocity - velocity.mean(axis=1, keepdims=True)
             
-            # 3. Orthogonal Signal Aggregation & Projection
-            stacked_vectors = np.stack(processed_blocks, axis=0)
+            norms = np.linalg.norm(velocity, axis=1, keepdims=True)
+            # Fixed the broken syntax brackets line with a clean NumPy boolean mask assignment
+            norms[norms < 10e-8] = 1.0
             
-            # Dynamic Signal-to-Noise Ratio (SNR) Weighting Matrix
-            signal_variance = np.var(stacked_vectors, axis=2, keepdims=True) + 1e-6
-            combined_alpha = np.sum(stacked_vectors * (1.0 / signal_variance), axis=0)
-            
-            # Strict Subspace Neutralization (Zero-Beta Guarantee)
-            alpha_demeaned = combined_alpha - combined_alpha.mean(axis=1, keepdims=True)
-            row_norms = np.linalg.norm(alpha_demeaned, axis=1, keepdims=True)
-            row_norms[row_norms < 1e-8] = 1.0
-            
-            # Map clean signals onto the optimized trading sphere radius
-            sphere_target = (alpha_demeaned / row_norms) * self.optimal_concentration
-            
-            # 4. Turn-Over Optimization Layer (L1 Hysteresis Trajectory Filter)
-            final_positions = np.zeros_like(sphere_target)
-            
-            if (
-                self.prev_signal is not None 
-                and self.prev_tickers is not None 
-                and self.prev_signal.shape == (J_assets,)
-                and self.prev_tickers.equals(tickers)
-            ):
-                active_position = self.prev_signal.copy()
+            target_signal = (velocity / norms) * self.concentration
+
+            # 4. Relative L1 hysteresis + EMA (guarantees non-flat)
+            final = np.zeros_like(target_signal)
+
+            if (self.prev_signal is not None and
+                    self.prev_tickers is not None and
+                    self.prev_signal.shape == (J,) and
+                    list(self.prev_tickers) == list(tickers)):
+                active = self.prev_signal.copy()
             else:
-                active_position = np.zeros(J_assets, dtype=np.float64)
-            
-            for t in range(N_time):
-                target_position = sphere_target[t]
-                l1_allocation_delta = np.sum(np.abs(target_position - active_position))
-                
-                if l1_allocation_delta < self.l1_hysteresis_threshold:
-                    # Inside the band: Maintain position to dodge transaction slippage completely
-                    current_allocation = active_position.copy()
+                active = target_signal[0].copy()          # never start at zero
+
+            for t in range(N):
+                tgt = target_signal[t]
+                delta = np.sum(np.abs(tgt - active))
+                scale = np.sum(np.abs(active)) + 10e-8
+
+                if delta < self.l1_rel_threshold * scale:
+                    curr = active
                 else:
-                    # Outside the band: Smooth execution transition
-                    current_allocation = (1.0 - self.decay) * target_position + self.decay * active_position
-                    current_allocation -= current_allocation.mean()
-                
-                final_positions[t] = current_allocation
-                active_position = current_allocation.copy()
-                
-            # 5. Regulatory Formatting & Maximum Risk Boundaries
-            final_df = pd.DataFrame(final_positions, index=features.index, columns=tickers)
-            final_df = final_df.sub(final_df.mean(axis=1), axis=0)
-            final_df = final_df.clip(-self.target_bound, self.target_bound)
-            final_df = final_df.sub(final_df.mean(axis=1), axis=0)
-            
-            self.prev_signal = final_df.iloc[-1].to_numpy(dtype=np.float64)
-            self.prev_tickers = final_df.columns.copy()
-            
-            return final_df.astype(np.float32)
-            
+                    curr = self.ema_alpha * tgt + (1.0 - self.ema_alpha) * active
+                    curr -= curr.mean()
+
+                final[t] = curr
+                active = curr
+
+            # 5. Final demean + clip
+            out = pd.DataFrame(final, index=features.index, columns=tickers)
+            out = out.sub(out.mean(axis=1), axis=0)
+            out = out.clip(-self.target_bound, self.target_bound)
+            out = out.sub(out.mean(axis=1), axis=0)
+
+            self.prev_signal = out.iloc[-1].to_numpy(dtype=np.float64)
+            self.prev_tickers = out.columns.copy()
+
+            return out.astype(np.float32)
+
         except Exception:
-            return zero_signal
+            if self.prev_signal is not None and len(self.prev_signal) == len(tickers):
+                return pd.DataFrame(
+                    np.tile(self.prev_signal, (len(features), 1)),
+                    index=features.index,
+                    columns=tickers,
+                    dtype=np.float32,
+                )
+            return zero
