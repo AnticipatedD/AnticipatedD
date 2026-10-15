@@ -11,9 +11,7 @@ from predictor import Predictor
 
 class MyPredictor(Predictor):
     """
-    AlphaNova Season 1 Cycle 5 – robust low-capacity rank signal.
-    Simple cross-sectional ranks + mild product interaction +
-    proper relative L1 hysteresis. Designed to pass flat-check and overfitting gate.
+    AlphaNova Season 1 Cycle 5 – clean low-capacity rank signal.
     """
     def __init__(self):
         super().__init__()
@@ -24,7 +22,7 @@ class MyPredictor(Predictor):
         self.target_bound = 1.40
         self.concentration = 0.30
         self.ema_alpha = 0.40
-        self.l1_rel_threshold = 0.15          # ← correct relative value (15%)
+        self.l1_rel_threshold = 0.15          # correct relative value
 
     def train(self, features: pd.DataFrame, target: pd.DataFrame) -> None:
         if features is not None and not features.empty:
@@ -46,7 +44,6 @@ class MyPredictor(Predictor):
             return zero
 
         try:
-            # 1. Cross-sectional ranks → [-1, 1]
             ranks = {}
             for feat in self.feature_names:
                 if feat not in features.columns.get_level_values(0):
@@ -62,9 +59,8 @@ class MyPredictor(Predictor):
             feat_list = list(ranks.keys())
             blocks = []
 
-            # 2. Individual ranks + one mild product interaction
             for i, f1 in enumerate(feat_list):
-                b = ranks[f1]                               # linear rank (low noise)
+                b = ranks[f1]
                 b = b - b.mean(axis=1, keepdims=True)
                 nrm = np.linalg.norm(b, axis=1, keepdims=True)
                 nrm = np.maximum(nrm, 1e-8)
@@ -76,16 +72,14 @@ class MyPredictor(Predictor):
                     inter = inter - inter.mean(axis=1, keepdims=True)
                     nrm = np.linalg.norm(inter, axis=1, keepdims=True)
                     nrm = np.maximum(nrm, 1e-8)
-                    blocks.append(inter / nrm * 0.45)       # down-weighted
+                    blocks.append(inter / nrm * 0.45)
 
-            # 3. Aggregate → demean → project
             velocity = np.mean(blocks, axis=0)
             velocity = velocity - velocity.mean(axis=1, keepdims=True)
             norms = np.linalg.norm(velocity, axis=1, keepdims=True)
-            norms = np.maximum(norms, 1e-8)                 # ← correct syntax
+            norms = np.maximum(norms, 1e-8)                 # ← FIXED
             target = (velocity / norms) * self.concentration
 
-            # 4. Relative L1 + EMA (never flat, never over-sticky)
             final = np.zeros_like(target)
 
             if (self.prev_signal is not None and
@@ -94,7 +88,7 @@ class MyPredictor(Predictor):
                     list(self.prev_tickers) == list(tickers)):
                 active = self.prev_signal.copy()
             else:
-                active = target[0].copy()                   # non-zero start
+                active = target[0].copy()
 
             for t in range(N):
                 tgt = target[t]
@@ -110,7 +104,6 @@ class MyPredictor(Predictor):
                 final[t] = curr
                 active = curr
 
-            # 5. Final demean + clip
             out = pd.DataFrame(final, index=features.index, columns=tickers)
             out = out.sub(out.mean(axis=1), axis=0)
             out = out.clip(-self.target_bound, self.target_bound)
