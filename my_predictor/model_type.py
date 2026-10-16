@@ -6,156 +6,220 @@
 #   "scikit-learn",
 # ]
 # ///
-import os
 import numpy as np
 import pandas as pd
 from predictor import Predictor
 from sklearn.linear_model import Ridge
 
+
 class MyPredictor(Predictor):
     """
-    AlphaNova Season 1 Cycle 5 Robust Production Engine.
-    Implements Cross-Sectional Ridge Mapping, Overfitting Gate Resilience,
-    Ambient City Space Repulsion Steering, and L2 Churn Smoothing.
+    AlphaNova Season 1 Cycle 5 — robust baseline predictor.
+
+    Design:
+      - Ridge regression learns a stable linear mapping from features to target.
+      - Predictions are de-meaned cross-sectionally at every timestamp.
+      - Final output is a cross-sectional percentile rank, centered at zero.
+      - No external files, no hidden state, no look-ahead, no positional bugs.
     """
-    def __init__(self):
+
+    def __init__(
+        self,
+        ridge_alpha: float = 100.0,
+        smoothing_span: int = 3,
+        clip_bound: float = 1.35,
+    ):
         super().__init__()
-        self.model = Ridge(alpha=100.0, fit_intercept=False)
+
+        self.model = Ridge(alpha=ridge_alpha, fit_intercept=False)
         self.feature_names = None
-        self.prev_signal = None
-        self.prev_tickers = None
-        
-        # OFFICIALLY CALIBRATED REGULATORY HYPERPARAMETERS
-        self.target_bound = 1.35            # Strict exposure cap limit
-        self.smoothing_factor = 0.40        # Mitigates the 5bp transaction fee Sharpe drag
-        self.novelty_steering_weight = 0.35 # Intensity for coordinate space deflection
+        self.tickers = None
+        self.is_fitted = False
+
+        self.smoothing_span = max(1, int(smoothing_span))
+        self.clip_bound = float(clip_bound)
+
+    # ------------------------------------------------------------------ #
+    # Helpers
+    # ------------------------------------------------------------------ #
+
+    @staticmethod
+    def _extract_wide_matrix(
+        features: pd.DataFrame,
+        feature: str,
+        tickers: pd.Index,
+    ) -> np.ndarray:
+        """
+        Extract one feature as a deterministic (time x ticker) matrix.
+        Reindexing prevents ticker-order mismatches between train and predict.
+        """
+        if feature not in features.columns.get_level_values(0):
+            raise KeyError(f"Missing feature: {feature}")
+
+        wide = features[feature].reindex(columns=tickers)
+        return wide.astype(np.float64).to_numpy()
+
+    def _zero_signal(self, features: pd.DataFrame) -> pd.DataFrame:
+        """Deterministic zero output for invalid or empty input."""
+        try:
+            tickers = sorted(features.columns.get_level_values(1).unique())
+        except Exception:
+            tickers = []
+
+        return pd.DataFrame(
+            0.0,
+            index=getattr(features, "index", pd.Index([])),
+            columns=tickers,
+            dtype=np.float32,
+        )
+
+    def _demean_cross_sectionally(self, values: np.ndarray) -> np.ndarray:
+        """Subtract each timestamp's cross-sectional mean."""
+        return values - np.nanmean(values, axis=1, keepdims=True)
+
+    def _to_rank_signal(self, values: np.ndarray, index, tickers) -> pd.DataFrame:
+        """
+        Convert raw predictions into a centered cross-sectional percentile rank.
+        Ranks are more robust than raw scores to outliers and scale changes.
+        """
+        raw = pd.DataFrame(values, index=index, columns=tickers)
+
+        ranks = raw.rank(axis=1, pct=True, na_option="keep")
+        ranks = ranks.sub(0.5, axis=1)
+
+        # Mild within-window smoothing; does not rely on prior predict() calls.
+        if self.smoothing_span > 1 and len(ranks) > 1:
+            ranks = ranks.ewm(span=self.smoothing_span, adjust=False).mean()
+            ranks = ranks.sub(ranks.mean(axis=1), axis=0)
+
+        return ranks.astype(np.float32)
+
+    # ------------------------------------------------------------------ #
+    # Training
+    # ------------------------------------------------------------------ #
 
     def train(self, features: pd.DataFrame, target: pd.DataFrame) -> None:
         """
-        Overfitting Gate Resilient Training. Learns a mapping function 
-        invariant to temporal row permutations.
+        Fit Ridge on aligned (time x ticker) matrices.
+
+        Important:
+          - Ticker order is fixed and stored.
+          - Feature order is fixed and stored.
+          - The model is marked fitted only after a successful fit.
         """
-        if features is not None and target is not None and not features.empty:
-            try:
-                # Align column ordering deterministically
-                self.feature_names = sorted(list(features.columns.get_level_values(0).unique()))
-                
-                X_list, y_list = [], []
-                # Flatten cross-sectionally to comply with row-permuted retrains
-                for feat in self.feature_names:
-                    X_list.append(features[feat].astype(np.float64).fillna(0.0).to_numpy().flatten())
-                
-                X = np.column_stack(X_list)
-                y = target.astype(np.float64).fillna(0.0).to_numpy().flatten()
-                
-                # Fit standard regularized linear model
-                self.model.fit(X, y)
-            except Exception:
-                pass
+        if features is None or target is None or features.empty or target.empty:
+            self.is_fitted = False
+            return
+
+        try:
+            self.tickers = pd.Index(
+                sorted(features.columns.get_level_values(1).unique())
+            )
+
+            self.feature_names = sorted(
+                features.columns.get_level_values(0).unique()
+            )
+
+            if len(self.feature_names) == 0 or len(self.tickers) == 0:
+                self.is_fitted = False
+                return
+
+            feature_matrices = [
+                self._extract_wide_matrix(features, feat, self.tickers)
+                for feat in self.feature_names
+            ]
+
+            X = np.stack(feature_matrices, axis=-1)  # time x ticker x feature
+
+            # Align target exactly to the same ticker order.
+            y_wide = target.reindex(columns=self.tickers)
+            y = y_wide.astype(np.float64).to_numpy()  # time x ticker
+
+            # Flatten consistently: every row is one (time, ticker) observation.
+            X_flat = X.reshape(-1, len(self.feature_names))
+            y_flat = y.reshape(-1)
+
+            valid = np.isfinite(X_flat).all(axis=1) & np.isfinite(y_flat)
+
+            if valid.sum() < 10:
+                self.is_fitted = False
+                return
+
+            self.model.fit(X_flat[valid], y_flat[valid])
+
+            # Ridge.coef_ is available only after a successful fit.
+            if not hasattr(self.model, "coef_"):
+                self.is_fitted = False
+                return
+
+            coef = np.asarray(self.model.coef_)
+
+            # Guard against multi-target shapes; this template expects one target.
+            if coef.ndim != 1 or coef.shape[0] != len(self.feature_names):
+                self.is_fitted = False
+                return
+
+            self.is_fitted = True
+
+        except Exception:
+            # Do not silently use a partially trained model.
+            self.is_fitted = False
+
+    # ------------------------------------------------------------------ #
+    # Inference
+    # ------------------------------------------------------------------ #
 
     def predict(self, features: pd.DataFrame) -> pd.DataFrame:
-        try:
-            tickers = features.columns.get_level_values(1).unique()
-        except Exception:
-            tickers = pd.Index([])
-
-        zero_signal = pd.DataFrame(0.0, index=getattr(features, "index", []), columns=tickers, dtype=np.float32)
-
-        if features is None or features.empty:
-            return zero_signal
-
-        current_features = sorted(list(features.columns.get_level_values(0).unique()))
-        if not self.feature_names:
-            self.feature_names = current_features
-        else:
-            self.feature_names = [f for f in self.feature_names if f in current_features]
-
-        if len(self.feature_names) == 0:
-            return zero_signal
+        if features is None or features.empty or not self.is_fitted:
+            return self._zero_signal(features)
 
         try:
-            # 1. Generate Base Cross-Sectional Predictions
-            N_time = len(features.index)
-            J_assets = len(tickers)
-            
-            raw_preds = np.zeros((N_time, J_assets), dtype=np.float64)
-            for idx, feat in enumerate(self.feature_names):
-                feat_mat = features[feat].astype(np.float64).fillna(0.0).to_numpy()
-                raw_preds += feat_mat * self.model.coef_[idx]
+            tickers = pd.Index(
+                sorted(features.columns.get_level_values(1).unique())
+            )
 
-            # Enforce immediate cross-sectional de-meaning (Zero-Beta Requirement)
-            raw_preds = raw_preds - raw_preds.mean(axis=1, keepdims=True)
+            if len(tickers) == 0:
+                return self._zero_signal(features)
 
-            # 2. Ambient City Space Novelty Deflection Layer
-            steering_vector = np.zeros_like(raw_preds)
-            cities_path = os.path.join("signal_db", "signal_cities_ambient_coords.parquet")
-            
-            if os.path.exists(cities_path):
-                try:
-                    df_ambient = pd.read_parquet(cities_path)
-                    # Extract occupied coordinates if matching asset structure dimensions
-                    if not df_ambient.empty and df_ambient.shape[1] == J_assets:
-                        occupied_coords = df_ambient.to_numpy(dtype=np.float64)
-                        
-                        # Calculate mean direction of competing signals
-                        avg_competing_city = occupied_coords.mean(axis=0, keepdims=True)
-                        avg_competing_city = avg_competing_city / (np.linalg.norm(avg_competing_city) + 1e-12)
-                        
-                        # Project onto orthogonal subspace to create direct geometric repulsion
-                        projection_scalar = np.dot(raw_preds, avg_competing_city.T)
-                        steering_vector = -(projection_scalar @ avg_competing_city)
-                        steering_vector = steering_vector - steering_vector.mean(axis=1, keepdims=True)
-                except Exception:
-                    steering_vector = np.zeros_like(raw_preds)
+            # Use only features seen during training, with their trained order.
+            available_features = set(
+                features.columns.get_level_values(0).unique()
+            )
 
-            # Blend raw predictions with our calculated novelty steering vector
-            combined_velocity = raw_preds + (self.novelty_steering_weight * steering_vector)
-            combined_velocity = combined_velocity - combined_velocity.mean(axis=1, keepdims=True)
-            
-            # Map clean signals onto the optimized trading unit sphere vector
-            norms = np.linalg.norm(combined_velocity, axis=1, keepdims=True)
-            norms[norms < 1e-10] = 1.0
-            target_signal = combined_velocity / norms
+            raw_preds = np.zeros(
+                (len(features.index), len(tickers)),
+                dtype=np.float64,
+            )
 
-            # 3. L2 Churn Smoothing Layer (Dampens 5bp slippage churn costs)
-            final_positions = np.zeros_like(target_signal)
-            
-            if (
-                self.prev_signal is not None 
-                and self.prev_tickers is not None 
-                and self.prev_signal.shape == (J_assets,)
-                and list(self.prev_tickers) == list(tickers)
-            ):
-                active_position = self.prev_signal.copy()
-            else:
-                active_position = target_signal[0].copy()
+            any_feature_used = False
 
-            for t in range(N_time):
-                # Smooth allocation path trajectory dynamically
-                curr_position = (self.smoothing_factor * target_signal[t] + 
-                                 (1.0 - self.smoothing_factor) * active_position)
-                curr_position -= curr_position.mean()
-                final_positions[t] = curr_position
-                active_position = curr_position.copy()
+            for feat, coef in zip(self.feature_names, self.model.coef_):
+                if feat not in available_features:
+                    continue
 
-            # 4. Final Compliance Formatting & Boundary Bounding
-            out = pd.DataFrame(final_positions, index=features.index, columns=tickers)
-            out = out.sub(out.mean(axis=1), axis=0)
-            out = out.clip(-self.target_bound, self.target_bound)
-            out = out.sub(out.mean(axis=1), axis=0)
+                feat_mat = self._extract_wide_matrix(features, feat, tickers)
+                raw_preds += feat_mat * coef
+                any_feature_used = True
 
-            # Persist tracking snapshots for out-of-sample consistency checks
-            self.prev_signal = out.iloc[-1].to_numpy(dtype=np.float64)
-            self.prev_tickers = out.columns.copy()
+            if not any_feature_used:
+                return self._zero_signal(features)
 
-            return out.astype(np.float32)
+            # Enforce zero-net cross-sectional exposure at every timestamp.
+            raw_preds = self._demean_cross_sectionally(raw_preds)
+
+            # Convert to robust, centered cross-sectional ranks.
+            signal = self._to_rank_signal(
+                raw_preds,
+                index=features.index,
+                tickers=tickers,
+            )
+
+            # Final compliance: de-mean, clip extremes, then de-mean again.
+            signal = signal.sub(signal.mean(axis=1), axis=0)
+            signal = signal.clip(-self.clip_bound, self.clip_bound)
+            signal = signal.sub(signal.mean(axis=1), axis=0)
+
+            return signal.astype(np.float32)
 
         except Exception:
-            if self.prev_signal is not None and len(self.prev_signal) == len(tickers):
-                return pd.DataFrame(
-                    np.tile(self.prev_signal, (len(features), 1)),
-                    index=features.index,
-                    columns=tickers,
-                    dtype=np.float32,
-                )
-            return zero_signal
+            return self._zero_signal(features)
