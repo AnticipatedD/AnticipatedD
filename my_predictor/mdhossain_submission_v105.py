@@ -2,162 +2,114 @@
 # dependencies = [
 #     "numpy",
 #     "pandas",
-#     "scikit-learn",
 # ]
 # ///
 import numpy as np
 import pandas as pd
-from sklearn.linear_model import Ridge
 from predictor import Predictor
 
 class MyPredictor(Predictor):
     """
-    Stateless market-neutral ridge on cross-sectional z-scores + momentum.
+    Robust market-neutral signal based on cross-sectional ranks + z-scores.
+    Pure numpy/pandas — no external model libraries.
     """
-    def __init__(self, alpha: float = 1.0, epsilon: float = 1e-8):
-        self.alpha = alpha
+    def __init__(self, epsilon: float = 1e-8):
         self.epsilon = epsilon
         self.feature_names = []
         self.is_trained = False
-        self.model = Ridge(alpha=alpha, fit_intercept=True)
-        self.optimal_concentration = 1.0
-        self.target_bound = 0.15
-
-    def _engineer_features(self, features_df: pd.DataFrame) -> np.ndarray:
-        """
-        Build (N_time, J_assets, N_feats) tensor of cross-sectional z-scores and lag-1 momentum.
-        """
-        if features_df is None or features_df.empty:
-            return np.zeros((0, 0, 1), dtype=np.float64)
-
-        # Ensure we know the ordered list of base feature names
-        if not self.feature_names:
-            self.feature_names = list(features_df.columns.get_level_values(0).unique())
-
-        tickers = features_df.columns.get_level_values(1).unique()
-        N_time = len(features_df)
-        J_assets = len(tickers)
-        feature_matrices = []
-
-        for feat in self.feature_names:
-            try:
-                raw = features_df[feat].astype(np.float64).to_numpy()
-            except Exception:
-                raw = np.zeros((N_time, J_assets), dtype=np.float64)
-
-            # Cross-sectional z-score (market-relative)
-            row_mean = np.nanmean(raw, axis=1, keepdims=True)
-            row_std = np.nanstd(raw, axis=1, keepdims=True)
-            row_std = np.where(row_std < self.epsilon, self.epsilon, row_std)
-            z = (raw - row_mean) / row_std
-            z = np.nan_to_num(z, nan=0.0, posinf=0.0, neginf=0.0)
-            z = np.clip(z, -3.0, 3.0)
-            feature_matrices.append(z)
-
-            # Simple lag-1 momentum
-            mom = np.zeros_like(raw)
-            if N_time > 1:
-                mom[1:] = raw[1:] - raw[:-1]
-            mom = np.nan_to_num(mom, nan=0.0, posinf=0.0, neginf=0.0)
-            feature_matrices.append(mom)
-
-        if not feature_matrices:
-            return np.zeros((N_time, J_assets, 1), dtype=np.float64)
-
-        return np.stack(feature_matrices, axis=-1)
+        self.target_bound = 1.35
 
     def train(self, features: pd.DataFrame, target: pd.DataFrame) -> None:
-        if features is None or features.empty or target is None or target.empty:
+        # Only need to remember the ordered list of base feature names
+        if features is None or features.empty:
+            self.feature_names = []
             self.is_trained = False
             return
-
-        self.feature_names = list(features.columns.get_level_values(0).unique())
-
-        features_sorted = features.sort_index(ascending=True)
-        target_sorted = target.sort_index(ascending=True)
-
-        # Align on common index / columns if necessary
-        common_idx = features_sorted.index.intersection(target_sorted.index)
-        if len(common_idx) == 0:
+        try:
+            self.feature_names = list(features.columns.get_level_values(0).unique())
+            self.is_trained = True
+        except Exception:
+            self.feature_names = []
             self.is_trained = False
-            return
 
-        features_sorted = features_sorted.loc[common_idx]
-        target_sorted = target_sorted.loc[common_idx]
+    def _safe_cs_zscore(self, mat: np.ndarray) -> np.ndarray:
+        """Cross-sectional z-score, fully NaN-safe."""
+        mat = np.asarray(mat, dtype=np.float64)
+        row_mean = np.nanmean(mat, axis=1, keepdims=True)
+        row_std = np.nanstd(mat, axis=1, keepdims=True)
+        row_std = np.where(np.isnan(row_std) | (row_std < self.epsilon), self.epsilon, row_std)
+        z = (mat - row_mean) / row_std
+        return np.nan_to_num(z, nan=0.0, posinf=0.0, neginf=0.0)
 
-        X_tensor = self._engineer_features(features_sorted)
-        y_matrix = target_sorted.astype(np.float64).fillna(0.0).to_numpy()
-
-        if X_tensor.size == 0 or y_matrix.size == 0:
-            self.is_trained = False
-            return
-
-        N_time, J_assets, N_feats = X_tensor.shape
-        X_flat = X_tensor.reshape(-1, N_feats)
-        y_flat = y_matrix.reshape(-1)
-
-        # Drop any remaining non-finite rows
-        mask = np.isfinite(X_flat).all(axis=1) & np.isfinite(y_flat)
-        if mask.sum() < 10:
-            self.is_trained = False
-            return
-
-        self.model.fit(X_flat[mask], y_flat[mask])
-        self.is_trained = True
+    def _safe_cs_rank(self, mat: np.ndarray) -> np.ndarray:
+        """Cross-sectional percentile rank centered at 0."""
+        mat = np.asarray(mat, dtype=np.float64)
+        # rank along axis=1, then map to [-0.5, 0.5]
+        # simple argsort method that tolerates NaNs
+        order = np.argsort(np.argsort(np.where(np.isnan(mat), np.inf, mat), axis=1), axis=1)
+        n = mat.shape[1]
+        ranks = (order.astype(np.float64) / max(n - 1, 1)) - 0.5
+        ranks = np.where(np.isnan(mat), 0.0, ranks)
+        return ranks
 
     def predict(self, features: pd.DataFrame) -> pd.DataFrame:
         if features is None or features.empty:
             return pd.DataFrame()
 
-        features_sorted = features.sort_index(ascending=True)
-        tickers = features_sorted.columns.get_level_values(1).unique()
-        zero_signal = pd.DataFrame(
-            0.0, index=features_sorted.index, columns=tickers, dtype=np.float32
-        )
-
         try:
-            X_tensor = self._engineer_features(features_sorted)
-            if X_tensor.size == 0:
-                return zero_signal
+            features_sorted = features.sort_index(ascending=True)
+            tickers = features_sorted.columns.get_level_values(1).unique()
+            idx = features_sorted.index
 
-            N_time, J_assets, N_feats = X_tensor.shape
+            # Determine which base features we can use
+            available = list(features_sorted.columns.get_level_values(0).unique())
+            feats_to_use = [f for f in self.feature_names if f in available] if self.feature_names else available
+            if not feats_to_use:
+                feats_to_use = available
 
-            if self.is_trained and hasattr(self.model, "coef_"):
-                X_flat = X_tensor.reshape(-1, N_feats)
-                raw_preds = self.model.predict(X_flat)
-                alpha_raw = raw_preds.reshape(N_time, J_assets)
-            else:
-                # Fallback: use first engineered feature (z-score) lightly scaled
-                alpha_raw = X_tensor[..., 0] * 0.05
+            if not feats_to_use:
+                return pd.DataFrame(0.0, index=features.index, columns=tickers, dtype=np.float32)
 
-            # Market-neutral: demean cross-sectionally
-            alpha_demeaned = alpha_raw - np.nanmean(alpha_raw, axis=1, keepdims=True)
-            alpha_demeaned = np.nan_to_num(alpha_demeaned, nan=0.0)
+            signals = []
+            for feat in feats_to_use:
+                try:
+                    raw = features_sorted[feat].astype(np.float64).to_numpy()
+                except Exception:
+                    continue
+                # Combine rank and z-score for robustness
+                r = self._safe_cs_rank(raw)
+                z = self._safe_cs_zscore(raw)
+                signals.append(0.6 * r + 0.4 * z)
 
-            # L2 normalize each row then scale
-            row_norms = np.linalg.norm(alpha_demeaned, axis=1, keepdims=True)
-            row_norms = np.where(row_norms < self.epsilon, self.epsilon, row_norms)
-            target_signals = (alpha_demeaned / row_norms) * self.optimal_concentration
+            if not signals:
+                return pd.DataFrame(0.0, index=features.index, columns=tickers, dtype=np.float32)
 
-            # Simple intra-batch exponential smoothing (stateless across calls)
-            decay = 0.65
-            smoothed = np.zeros_like(target_signals)
-            prev = np.zeros(J_assets, dtype=np.float64)
-            for t in range(N_time):
-                curr = decay * target_signals[t] + (1.0 - decay) * prev
-                curr = curr - curr.mean()          # keep neutral
-                smoothed[t] = curr
-                prev = curr
+            # Average the engineered signals
+            alpha = np.mean(np.stack(signals, axis=0), axis=0)
 
-            final_df = pd.DataFrame(
-                smoothed, index=features_sorted.index, columns=tickers
-            )
-            final_df = final_df.clip(-self.target_bound, self.target_bound)
-            final_df = final_df.reindex(index=features.index, columns=tickers).fillna(0.0)
+            # Market-neutral
+            alpha = alpha - np.nanmean(alpha, axis=1, keepdims=True)
+            alpha = np.nan_to_num(alpha, nan=0.0)
 
-            return final_df.astype(np.float32)
+            # L2 row-normalize then scale
+            norms = np.linalg.norm(alpha, axis=1, keepdims=True)
+            norms = np.where(norms < self.epsilon, self.epsilon, norms)
+            alpha = (alpha / norms) * 1.0
+
+            # Clip
+            alpha = np.clip(alpha, -self.target_bound, self.target_bound)
+
+            out = pd.DataFrame(alpha, index=idx, columns=tickers)
+            # Align exactly to the original caller's index & columns
+            out = out.reindex(index=features.index, columns=tickers).fillna(0.0)
+            return out.astype(np.float32)
 
         except Exception:
-            return zero_signal.reindex(index=features.index).fillna(0.0).astype(np.float32)
+            # Last-resort zero signal with correct shape
+            try:
+                tickers = features.columns.get_level_values(1).unique()
+                return pd.DataFrame(0.0, index=features.index, columns=tickers, dtype=np.float32)
+            except Exception:
+                return pd.DataFrame()
 
 predictor = MyPredictor()
