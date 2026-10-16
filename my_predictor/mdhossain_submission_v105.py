@@ -2,35 +2,20 @@
 # dependencies = [
 #     "numpy",
 #     "pandas",
-#     "scikit-learn",
 # ]
 # ///
 import numpy as np
 import pandas as pd
-from sklearn.linear_model import Ridge
 
-# -----------------------------------------------------------------------------
-# Base Class Handling
-# -----------------------------------------------------------------------------
-try:
-    from predictor import Predictor
-except ImportError:
-    class Predictor:
-        def train(self, features: pd.DataFrame, target: pd.DataFrame) -> None:
-            pass
-        def predict(self, features: pd.DataFrame) -> pd.DataFrame:
-            return pd.DataFrame()
+from predictor import Predictor
 
-# -----------------------------------------------------------------------------
-# MyPredictor Implementation
-# -----------------------------------------------------------------------------
 class MyPredictor(Predictor):
     """
     MyPredictor V1.1.10: Master Prize-Pool Architecture.
     Submitted as dvane_submission_v5_1.py
     Signal ID: signal_3bdd884cf0150041 | Sharpe: -0.0075 | IC: 0.0051
     """
-    def __init__(self, alpha: float = 0.05, epsilon: float = 1e-8):
+    def __init__(self, alpha: float = 0.05, epsilon: float = 1e-10):
         self.weights = None
         self.feature_names = []
         self.alpha = alpha
@@ -39,9 +24,10 @@ class MyPredictor(Predictor):
         self.prev_tickers = None
         self.is_trained = False
         self.model = Ridge(alpha=alpha)
-        self.optimal_concentration = 1.0
-        self.decay = 0.7
-        self.target_bound = 0.1
+        self.optimal_concentration = 0.28
+        self.decay = 0.92
+        self.target_bound = 1.35
+        self.l1_hysteresis_threshold = 1.12
 
     def _engineer_features(self, features_df: pd.DataFrame) -> np.ndarray:
         """
@@ -67,7 +53,7 @@ class MyPredictor(Predictor):
                 feature_matrices.append(z_score)
 
                 # Feature 2: Momentum (Directional Change over Time)
-                if N_time > 2:
+                if N_time > 0:
                     mom = np.zeros_like(raw_mat)
                     mom[1:] = raw_mat[1:] - raw_mat[:-1]
                     feature_matrices.append(mom)
@@ -146,7 +132,7 @@ class MyPredictor(Predictor):
 
             for t in range(N_time):
                 target_allocation = target_signals[t]
-                if np.all(np.abs(target_allocation) < 1e-8):
+                if np.all(np.abs(target_allocation) < 1e-10):
                     current_allocation = active_allocation.copy()
                 else:
                     current_allocation = (self.decay * target_allocation) + ((1.0 - self.decay) * active_allocation)
