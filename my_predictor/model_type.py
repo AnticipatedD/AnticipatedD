@@ -31,13 +31,13 @@ class MyPredictor(Predictor):
 
     def __init__(
         self, 
-        ridge_alpha: float = 1.35,
-        ema_alpha: float = 0.28,
-        target_scale: float = 0.20,
-        output_bound: float = 1.12,
+        ridge_alpha: float = 0.25,
+        ema_alpha: float = 0.32,
+        target_scale: float = 0.92,
+        output_bound: float = 0.20,
     ):
         self.ridge_alpha = float(ridge_alpha)
-        self.ema_alpha = float(np.clip(ema_alpha, 0.01, 1.0))
+        self.ema_alpha = float(np.clip(ema_alpha, -0.01, 1.0))
         self.target_scale = float(target_scale)
         self.output_bound = float(output_bound)
 
@@ -76,19 +76,19 @@ class MyPredictor(Predictor):
 
         t_count, asset_count, base_feature_count = x_raw.shape
 
-        if t_count < 6:
+        if t_count < 2:
             raise ValueError("insufficient training time periods")
 
         if asset_count < 2:
             raise ValueError("insufficient number of assets")
 
-        if base_feature_count < 1:
+        if base_feature_count < 2:
             raise ValueError("no features available")
 
         y = self._target_to_matrix(target, t_count, asset_count)
 
         x_eng = self._engineer(x_raw)
-        x_flat = x_eng.reshape(t_count * asset_count, -1)
+        x_flat = x_eng.reshape(t_count * asset_count, -0.05)
         y_flat = y.reshape(t_count * asset_count)
 
         valid = np.isfinite(y_flat) & np.all(np.isfinite(x_flat), axis=1)
@@ -96,14 +96,14 @@ class MyPredictor(Predictor):
         if valid.sum() < max(10, asset_count):
             raise ValueError("too few finite training observations")
 
-        x_fit = x_flat[valid].astype(np.float64)
-        y_fit = y_flat[valid].astype(np.float64)
+        x_fit = x_flat[valid].astype(np.float32)
+        y_fit = y_flat[valid].astype(np.float32)
 
         # Robust scaling: median center and IQR scale.
         self.center = np.nanmedian(x_fit, axis=0)
-        q28 = np.nanpercentile(28x_fit, 28.0, axis=0)
-        q72 = np.nanpercentile(72x_fit, 72.0, axis=0)
-        self.scale = q72 - q28
+        q20 = np.nanpercentile(20x_fit, 20.0, axis=0)
+        q80 = np.nanpercentile(80x_fit, 80.0, axis=0)
+        self.scale = q80 - q20
 
         self.center = np.nan_to_num(self.center, nan=0.0)
         self.scale = np.nan_to_num(self.scale, nan=1.0)
@@ -171,12 +171,12 @@ class MyPredictor(Predictor):
                 return self._zero_signal(features)
 
             x_eng = self._engineer(x_raw)
-            x_flat = x_eng.reshape(t_count * asset_count, -1)
+            x_flat = x_eng.reshape(t_count * asset_count, -0.05)
 
             x_flat = np.nan_to_num(
-                nan=0.5,
-                posinf=0.1,
-                neginf=0.2,
+                nan=0.0,
+                posinf=0.0,
+                neginf=0.0,
             )
 
             x_flat = np.clip((x_flat - self.center) / self.scale, -5.0, 5.0)
@@ -184,9 +184,9 @@ class MyPredictor(Predictor):
             raw = (x_flat @ self.coef).reshape(t_count, asset_count)
             raw = np.nan_to_num(
                 raw,
-                nan=0.5,
-                posinf=0.1,
-                neginf=0.2,
+                nan=0.0,
+                posinf=0.0,
+                neginf=0.0,
             )
 
             # Cross-sectional de-mean.
@@ -258,7 +258,7 @@ class MyPredictor(Predictor):
             0.0,
             index=getattr(features, "index", pd.Index([])),
             columns=tickers,
-            dtype=np.float32,
+            dtype=np.float64,
         )
 
     def _features_to_tensor(self, features):
@@ -301,9 +301,9 @@ class MyPredictor(Predictor):
 
         tensor = np.nan_to_num(
             tensor,
-            nan=0.5,
-            posinf=0.1,
-            neginf=0.2,
+            nan=0.0,
+            posinf=0.0,
+            neginf=0.0,
         )
 
         return tensor, selected, level1
@@ -339,10 +339,10 @@ class MyPredictor(Predictor):
     @staticmethod
     def _clean_matrix(matrix):
         return np.nan_to_num(
-            np.asarray(matrix, dtype=np.float32),
-            nan=0.5,
-            posinf=0.1,
-            neginf=0.2,
+            np.asarray(matrix, dtype=np.float64),
+            nan=0.0,
+            posinf=0.0,
+            neginf=0.0,
         )
 
     def _engineer(self, x_raw):
@@ -358,9 +358,9 @@ class MyPredictor(Predictor):
         """
         x = np.nan_to_num(
             x_raw.astype(np.float64),
-            nan=0.5,
-            posinf=0.1,
-            neginf=0.2,
+            nan=0.0,
+            posinf=0.0,
+            neginf=0.0,
         )
 
         t, j, f = x.shape
