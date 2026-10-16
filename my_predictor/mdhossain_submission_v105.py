@@ -6,12 +6,13 @@
 # ///
 
 """
-Conservative rank-based predictor (upload as predictor.py to recover net Sharpe).
+Conservative ridge-learning predictor (upload as predictor.py).
 
-- Strong causal smoothing (EWMA span=240)
-- Very large L1 hysteresis band (l1_hysteresis_threshold=3.0) to prevent churn
-- No train() learning required (train is no-op)
-- Returns are cross-sectionally de-meaned and clipped
+- Strong ridge (ridge_lambda=200)
+- Very slow adaptation: smoothing_alpha small = 0.05 (so changes slowly)
+- Large hysteresis band = 2.5
+- Low concentration_radius to shrink gross exposure
+- No novelty projection
 """
 
 from __future__ import annotations
@@ -22,64 +23,110 @@ from predictor import Predictor
 class MyPredictor(Predictor):
     def __init__(
         self,
-        ewm_span: int = 240,
-        l1_hysteresis_threshold: float = 3.0,
-        tail_clip: float = 0.5,
-        gross_leverage: float = 1.0,
+        smoothing_alpha: float = 0.05,
+        concentration_radius: float = 0.40,
+        tail_clip: float = 0.4,
+        ridge_lambda: float = 200.0,
+        l1_hysteresis_threshold: float = 2.5,
+        rng_seed: int = 42,
     ):
         super().__init__()
-        self.ewm_span = int(ewm_span)
-        self.l1_hysteresis_threshold = float(l1_hysteresis_threshold)
+        self.smoothing_alpha = float(smoothing_alpha)
+        self.concentration_radius = float(concentration_radius)
         self.tail_clip = float(tail_clip)
-        self.gross_leverage = float(gross_leverage)
+        self.ridge_lambda = float(ridge_lambda)
+        self.l1_hysteresis_threshold = float(l1_hysteresis_threshold)
+        self.rng = np.random.RandomState(int(rng_seed))
 
+        self.feature_names = None
+        self.weights = None
         self.prev_signal = None
         self.prev_tickers = None
-        self.feature_names = None
+
+    def _engineer_features(self, features: pd.DataFrame) -> np.ndarray:
+        # same robust 3-interaction design
+        if isinstance(features.columns, pd.MultiIndex):
+            tickers = features.columns.get_level_values(1).unique()
+            feat_names = list(features.columns.get_level_values(0).unique())
+        else:
+            tickers = features.columns
+            feat_names = list(features.columns)
+        if self.feature_names is None:
+            self.feature_names = feat_names[:6]
+
+        ranks = {}
+        for feat in self.feature_names:
+            if isinstance(features.columns, pd.MultiIndex) and feat in features.columns.get_level_values(0):
+                df_feat = features.xs(feat, level=0, axis=1).astype(float).reindex(columns=tickers, fill_value=0.0)
+            else:
+                df_feat = pd.DataFrame(0.0, index=features.index, columns=tickers, dtype=float)
+            r = (df_feat.rank(axis=1, pct=True, method="first") - 0.5) * 2.0
+            ranks[feat] = r.fillna(0.0).to_numpy()
+
+        base = [ranks[k] for k in ranks]
+        while len(base) < 6:
+            base.append(np.zeros_like(base[0]))
+        f1, f2, f3, f4, f5, f6 = base[:6]
+        inter_1 = f1 * np.sign(f2)
+        inter_2 = f3 * np.sign(f4)
+        inter_3 = np.tanh(f5 - f6)
+        return np.stack([inter_1, inter_2, inter_3], axis=2).astype(float)
 
     def train(self, features: pd.DataFrame, target: pd.DataFrame) -> None:
-        # No learning for this conservative baseline; just record feature names
-        if features is not None:
-            if isinstance(features.columns, pd.MultiIndex):
-                self.feature_names = list(features.columns.get_level_values(0).unique())
-            else:
-                self.feature_names = list(features.columns)
-
-    def _cs_rank_mean(self, features: pd.DataFrame) -> pd.DataFrame:
-        # Compute cross-sectional ranks for each feature and average them
+        if features is None or target is None or features.empty or target.empty:
+            self.weights = np.zeros(3, dtype=float)
+            return
         if isinstance(features.columns, pd.MultiIndex):
-            features_by_name = {}
-            for name in features.columns.get_level_values(0).unique():
-                df = features.xs(name, level=0, axis=1).astype(float)
-                # rank per-row to [-1,1]
-                r = (df.rank(axis=1, pct=True, method="first") - 0.5) * 2.0
-                features_by_name[name] = r
-            # align ticker columns by lexicographic order
-            # compute mean across features (only those present)
-            stack = [features_by_name[n] for n in features_by_name]
-            mean_rank = pd.concat(stack, axis=1).groupby(level=1, axis=1).mean()
+            self.feature_names = list(features.columns.get_level_values(0).unique())[:6]
+            tickers = features.columns.get_level_values(1).unique()
         else:
-            # single-level columns: rank directly
-            r = (features.rank(axis=1, pct=True, method="first") - 0.5) * 2.0
-            mean_rank = r
-        return mean_rank
+            self.feature_names = list(features.columns)[:6]
+            tickers = target.columns
+
+        features_sorted = features.sort_index()
+        target_sorted = target.sort_index()
+        X = self._engineer_features(features_sorted)
+        N_time, J_assets, N_feats = X.shape
+        target_aligned = target_sorted.reindex(columns=tickers, fill_value=0.0).astype(float)
+        y = target_aligned.to_numpy().reshape(-1)
+        X_flat = X.reshape(-1, N_feats)
+        XTX = X_flat.T.dot(X_flat)
+        XTy = X_flat.T.dot(y)
+        reg = self.ridge_lambda * np.eye(N_feats)
+        try:
+            self.weights = np.linalg.solve(XTX + reg, XTy)
+        except Exception:
+            self.weights = np.linalg.pinv(XTX + reg).dot(XTy)
+        if self.weights is None or len(self.weights) != N_feats:
+            self.weights = np.zeros(N_feats, dtype=float)
 
     def predict(self, features: pd.DataFrame) -> pd.DataFrame:
         if features is None or len(features) == 0:
             return pd.DataFrame()
+        if self.feature_names is None:
+            if isinstance(features.columns, pd.MultiIndex):
+                self.feature_names = list(features.columns.get_level_values(0).unique())[:6]
+            else:
+                self.feature_names = list(features.columns)[:6]
+        if self.weights is None:
+            self.weights = np.zeros(3, dtype=float)
 
-        mean_rank = self._cs_rank_mean(features)
-        # EWM smoothing (causal)
-        smoothed = mean_rank.ewm(span=self.ewm_span, adjust=False, min_periods=1).mean()
+        features_sorted = features.sort_index()
+        if isinstance(features_sorted.columns, pd.MultiIndex):
+            tickers = features_sorted.columns.get_level_values(1).unique()
+        else:
+            tickers = features_sorted.columns
 
-        # Normalize to gross leverage: make L1 per row sum = gross_leverage*2? We'll scale to L1 sum = gross_leverage
-        s = smoothed.sub(smoothed.mean(axis=1), axis=0)
-        denom = s.abs().sum(axis=1).replace(0, np.nan)
-        positions = s.div(denom, axis=0).fillna(0.0) * self.gross_leverage
+        X = self._engineer_features(features_sorted)
+        if X.size == 0:
+            return pd.DataFrame(columns=tickers, index=features_sorted.index).fillna(0.0)
 
-        # Enforce hysteresis: only change if L1 delta > threshold
-        tickers = positions.columns
-        out = positions.copy().astype(np.float32)
+        alpha_raw = np.tensordot(X, self.weights, axes=([2],[0]))
+        alpha_dm = alpha_raw - alpha_raw.mean(axis=1, keepdims=True)
+        norms = np.linalg.norm(alpha_dm, axis=1, keepdims=True)
+        eps = 1e-8
+        sphere_velocity = (alpha_dm / (norms + eps)) * self.concentration_radius
+
         if (
             self.prev_signal is not None
             and self.prev_tickers is not None
@@ -87,28 +134,29 @@ class MyPredictor(Predictor):
             and self.prev_tickers.equals(tickers)
             and self.prev_signal.shape == (len(tickers),)
         ):
-            prev = pd.Series(self.prev_signal, index=tickers)
+            active = self.prev_signal.copy()
         else:
-            prev = pd.Series(0.0, index=tickers)
+            active = np.zeros(len(tickers), dtype=float)
 
-        for idx in out.index:
-            target = out.loc[idx]
-            l1 = (target - prev).abs().sum()
-            if l1 < self.l1_hysteresis_threshold:
-                # maintain previous to avoid churn
-                out.loc[idx] = prev.values
+        sm = np.zeros_like(sphere_velocity)
+        for t in range(sphere_velocity.shape[0]):
+            target = sphere_velocity[t]
+            if np.all(np.abs(target) < 1e-12):
+                cur = active.copy()
             else:
-                # adopt new target but clip and de-mean
-                vec = target - target.mean()
-                vec = vec.clip(-self.tail_clip, self.tail_clip)
-                out.loc[idx] = vec.values
-                prev = out.loc[idx]
-        # store last state
-        self.prev_signal = prev.values.copy()
-        self.prev_tickers = tickers.copy()
-        # ensure cross-sectional de-mean
-        out = out.sub(out.mean(axis=1), axis=0).fillna(0.0)
-        return out
+                l1 = np.sum(np.abs(target - active))
+                if l1 < self.l1_hysteresis_threshold:
+                    cur = active.copy()
+                else:
+                    cur = (self.smoothing_alpha * target) + ((1.0 - self.smoothing_alpha) * active)
+                    cur = cur - cur.mean()
+            sm[t] = cur
+            active = cur.copy()
+        self.prev_signal = sm[-1].copy()
+        self.prev_tickers = pd.Index(tickers)
+        df = pd.DataFrame(sm, index=features_sorted.index, columns=tickers)
+        df = df.sub(df.mean(axis=1), axis=0).clip(-self.tail_clip, self.tail_clip).sub(df.mean(axis=1), axis=0)
+        return df.astype(float)
 
 # required instantiation
 predictor = MyPredictor()
