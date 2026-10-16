@@ -1,127 +1,163 @@
 # /// script
 # dependencies = [
-#   "numpy",
-#   "pandas",
+#     "numpy",
+#     "pandas",
+#     "scikit-learn",
 # ]
 # ///
 import numpy as np
 import pandas as pd
+from sklearn.linear_model import Ridge
 from predictor import Predictor
 
 class MyPredictor(Predictor):
     """
-    Production-Grade Quant Strategy for AlphaNova Biweekly Tournament.
-    Implements a Cross-Sectional Non-Linear Phase-Shift Expansion with 
-    Exact L1 Turnover Hysteresis and Spherical Variance Stabilization.
+    Stateless market-neutral ridge on cross-sectional z-scores + momentum.
     """
-    def __init__(self):
-        super().__init__()
-        self.feature_names = None
-        self.prev_signal = None
-        self.prev_tickers = None
-        
-        # Hyperparameters tuned to meet target metrics
-        self.target_bound = 0.20
-        self.optimal_concentration = 0.28  # Target concentration within [0.1, 0.5]
-        self.l1_hysteresis_threshold = 1.00  # Strict L1 turnover protection buffer
+    def __init__(self, alpha: float = 1.0, epsilon: float = 1e-8):
+        self.alpha = alpha
+        self.epsilon = epsilon
+        self.feature_names = []
+        self.is_trained = False
+        self.model = Ridge(alpha=alpha, fit_intercept=True)
+        self.optimal_concentration = 1.0
+        self.target_bound = 0.15
+
+    def _engineer_features(self, features_df: pd.DataFrame) -> np.ndarray:
+        """
+        Build (N_time, J_assets, N_feats) tensor of cross-sectional z-scores and lag-1 momentum.
+        """
+        if features_df is None or features_df.empty:
+            return np.zeros((0, 0, 1), dtype=np.float64)
+
+        # Ensure we know the ordered list of base feature names
+        if not self.feature_names:
+            self.feature_names = list(features_df.columns.get_level_values(0).unique())
+
+        tickers = features_df.columns.get_level_values(1).unique()
+        N_time = len(features_df)
+        J_assets = len(tickers)
+        feature_matrices = []
+
+        for feat in self.feature_names:
+            try:
+                raw = features_df[feat].astype(np.float64).to_numpy()
+            except Exception:
+                raw = np.zeros((N_time, J_assets), dtype=np.float64)
+
+            # Cross-sectional z-score (market-relative)
+            row_mean = np.nanmean(raw, axis=1, keepdims=True)
+            row_std = np.nanstd(raw, axis=1, keepdims=True)
+            row_std = np.where(row_std < self.epsilon, self.epsilon, row_std)
+            z = (raw - row_mean) / row_std
+            z = np.nan_to_num(z, nan=0.0, posinf=0.0, neginf=0.0)
+            z = np.clip(z, -3.0, 3.0)
+            feature_matrices.append(z)
+
+            # Simple lag-1 momentum
+            mom = np.zeros_like(raw)
+            if N_time > 1:
+                mom[1:] = raw[1:] - raw[:-1]
+            mom = np.nan_to_num(mom, nan=0.0, posinf=0.0, neginf=0.0)
+            feature_matrices.append(mom)
+
+        if not feature_matrices:
+            return np.zeros((N_time, J_assets, 1), dtype=np.float64)
+
+        return np.stack(feature_matrices, axis=-1)
 
     def train(self, features: pd.DataFrame, target: pd.DataFrame) -> None:
-        """
-        Shuffling-gate resilient feature mapping. Extracts structural feature columns 
-        independent of time row arrangements.
-        """
-        if features is not None:
-            self.feature_names = list(features.columns.get_level_values(0).unique())
+        if features is None or features.empty or target is None or target.empty:
+            self.is_trained = False
+            return
+
+        self.feature_names = list(features.columns.get_level_values(0).unique())
+
+        features_sorted = features.sort_index(ascending=True)
+        target_sorted = target.sort_index(ascending=True)
+
+        # Align on common index / columns if necessary
+        common_idx = features_sorted.index.intersection(target_sorted.index)
+        if len(common_idx) == 0:
+            self.is_trained = False
+            return
+
+        features_sorted = features_sorted.loc[common_idx]
+        target_sorted = target_sorted.loc[common_idx]
+
+        X_tensor = self._engineer_features(features_sorted)
+        y_matrix = target_sorted.astype(np.float64).fillna(0.0).to_numpy()
+
+        if X_tensor.size == 0 or y_matrix.size == 0:
+            self.is_trained = False
+            return
+
+        N_time, J_assets, N_feats = X_tensor.shape
+        X_flat = X_tensor.reshape(-1, N_feats)
+        y_flat = y_matrix.reshape(-1)
+
+        # Drop any remaining non-finite rows
+        mask = np.isfinite(X_flat).all(axis=1) & np.isfinite(y_flat)
+        if mask.sum() < 10:
+            self.is_trained = False
+            return
+
+        self.model.fit(X_flat[mask], y_flat[mask])
+        self.is_trained = True
 
     def predict(self, features: pd.DataFrame) -> pd.DataFrame:
-        tickers = features.columns.get_level_values(1).unique()
-        zero_signal = pd.DataFrame(0.0, index=features.index, columns=tickers, dtype=np.float32)
-        
-        if len(features) == 0 or not self.feature_names or len(self.feature_names) < 0:
-            return zero_signal
-            
-        try:
-            # 1. Row-Wise Cross-Sectional Rank Transform (Guarantees Shuffling Immunity)
-            ranks = {}
-            for feat in self.feature_names:
-                block_val = features[feat].astype(np.float64)
-                # Max-ranking handles zero-variance or flat warm-up rows without breakdown
-                r = (block_val.rank(axis=1, pct=True, method='max') - 0.5) * 2.0
-                ranks[feat] = r.fillna(0.0).to_numpy()
+        if features is None or features.empty:
+            return pd.DataFrame()
 
-            N_time, J_assets = list(ranks.values())[0].shape
-            
-            # 2. Non-Linear Spatial Expansion (Drives City > 60° and Global > 75°)
-            # Linear metrics carry no edge due to the obfuscated target structure.
-            interaction_blocks = []
-            
-            for i in range(len(self.feature_names)):
-                f1 = self.feature_names[i]
-                # Bounded non-linear activation
-                interaction_blocks.append(np.tanh(ranks[f1] * 2.0))
-                
-                for j in range(i + 1, len(self.feature_names)):
-                    f2 = self.feature_names[j]
-                    # Dynamic phase-shifted combinations to step outside standard tracking clusters
-                    interaction_blocks.append(np.sin(ranks[f1] * np.pi * 0.25) * np.cos(ranks[f2] * np.pi * 0.25))
-                    interaction_blocks.append(ranks[f1] * np.abs(ranks[f2]))
-            
-            # Extract consensus signal velocity across orthogonal components
-            raw_velocity = np.mean(interaction_blocks, axis=0)
-            
-            # 3. Geometric Subspace Demean & Hypersphere S^{J-2} Projection
-            # Strictly eliminate systematic market exposure row by row
-            velocity_demeaned = raw_velocity - raw_velocity.mean(axis=1, keepdims=True)
-            
-            # Spherical normalization
-            norms = np.linalg.norm(velocity_demeaned, axis=1, keepdims=True)
-            norms[norms < 1e-8] = 1.0
-            sphere_target = (velocity_demeaned / norms) * self.optimal_concentration
-            
-            # 4. Execution Filter: L1 Causal Hysteresis Loop
-            final_positions = np.zeros_like(sphere_target)
-            
-            # Ensure continuity during streaming or evaluation state shifts
-            if (
-                self.prev_signal is not None 
-                and self.prev_tickers is not None 
-                and self.prev_signal.shape == (J_assets,)
-                and self.prev_tickers.equals(tickers)
-            ):
-                active_position = self.prev_signal.copy()
+        features_sorted = features.sort_index(ascending=True)
+        tickers = features_sorted.columns.get_level_values(1).unique()
+        zero_signal = pd.DataFrame(
+            0.0, index=features_sorted.index, columns=tickers, dtype=np.float32
+        )
+
+        try:
+            X_tensor = self._engineer_features(features_sorted)
+            if X_tensor.size == 0:
+                return zero_signal
+
+            N_time, J_assets, N_feats = X_tensor.shape
+
+            if self.is_trained and hasattr(self.model, "coef_"):
+                X_flat = X_tensor.reshape(-1, N_feats)
+                raw_preds = self.model.predict(X_flat)
+                alpha_raw = raw_preds.reshape(N_time, J_assets)
             else:
-                active_position = np.zeros(J_assets, dtype=np.float64)
-            
+                # Fallback: use first engineered feature (z-score) lightly scaled
+                alpha_raw = X_tensor[..., 0] * 0.05
+
+            # Market-neutral: demean cross-sectionally
+            alpha_demeaned = alpha_raw - np.nanmean(alpha_raw, axis=1, keepdims=True)
+            alpha_demeaned = np.nan_to_num(alpha_demeaned, nan=0.0)
+
+            # L2 normalize each row then scale
+            row_norms = np.linalg.norm(alpha_demeaned, axis=1, keepdims=True)
+            row_norms = np.where(row_norms < self.epsilon, self.epsilon, row_norms)
+            target_signals = (alpha_demeaned / row_norms) * self.optimal_concentration
+
+            # Simple intra-batch exponential smoothing (stateless across calls)
+            decay = 0.65
+            smoothed = np.zeros_like(target_signals)
+            prev = np.zeros(J_assets, dtype=np.float64)
             for t in range(N_time):
-                target_position = sphere_target[t]
-                
-                # Check the exact structural L1 distance to neutralize the 5bp fee drag
-                l1_allocation_delta = np.sum(np.abs(target_position - active_position))
-                
-                if l1_allocation_delta < self.l1_hysteresis_threshold:
-                    # Inside the band: Maintain active position to reduce churn costs to ~1%
-                    current_allocation = active_position.copy()
-                else:
-                    # Outside the band: Smooth execution adjustment for optimized path decay
-                    current_allocation = 0.22 * target_position + 0.78 * active_position
-                    current_allocation -= current_allocation.mean()  # Re-verify dollar neutrality
-                
-                final_positions[t] = current_allocation
-                active_position = current_allocation.copy()
-                
-            # 5. Compliance Formatting & Final Re-Centering
-            final_df = pd.DataFrame(final_positions, index=features.index, columns=tickers)
-            
-            # Enforce zero cross-sectional sum and hard boundary limits
-            final_df = final_df.sub(final_df.mean(axis=1), axis=0)
+                curr = decay * target_signals[t] + (1.0 - decay) * prev
+                curr = curr - curr.mean()          # keep neutral
+                smoothed[t] = curr
+                prev = curr
+
+            final_df = pd.DataFrame(
+                smoothed, index=features_sorted.index, columns=tickers
+            )
             final_df = final_df.clip(-self.target_bound, self.target_bound)
-            final_df = final_df.sub(final_df.mean(axis=1), axis=0)
-            
-            # Store state snapshot for downstream blocks
-            self.prev_signal = final_df.iloc[-1].to_numpy(dtype=np.float64)
-            self.prev_tickers = final_df.columns.copy()
-            
+            final_df = final_df.reindex(index=features.index, columns=tickers).fillna(0.0)
+
             return final_df.astype(np.float32)
-            
+
         except Exception:
-            return zero_signal
+            return zero_signal.reindex(index=features.index).fillna(0.0).astype(np.float32)
+
+predictor = MyPredictor()
