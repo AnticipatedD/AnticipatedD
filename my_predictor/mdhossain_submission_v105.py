@@ -11,66 +11,63 @@ from predictor import Predictor
 
 class MyPredictor(Predictor):
     """
-    MyPredictor V1.1.10: Master Prize-Pool Architecture.
-    Submitted as dvane_submission_v5_1.py
-    Signal ID: signal_3bdd884cf0150041 | Sharpe: -0.0075 | IC: 0.0051
+    MyPredictor V1.1.11: Stateless market-neutral ridge on cross-sectional z-scores + momentum.
     """
-    def __init__(self, alpha: float = 0.05, epsilon: float = 1e-10):
-        self.weights = None
-        self.feature_names = []
+    def __init__(self, alpha: float = 1.0, epsilon: float = 1e-8):
         self.alpha = alpha
         self.epsilon = epsilon
-        self.prev_signal = None
-        self.prev_tickers = None
+        self.feature_names = []
         self.is_trained = False
-        self.model = Ridge(alpha=alpha)
-        self.optimal_concentration = 0.28
-        self.decay = 0.92
+        self.model = Ridge(alpha=alpha, fit_intercept=True)
+        self.optimal_concentration = 0.25
         self.target_bound = 1.35
-        self.l1_hysteresis_threshold = 1.12
 
     def _engineer_features(self, features_df: pd.DataFrame) -> np.ndarray:
         """
-        Extracts predictive structural features: Rolling Momentum and Cross-Sectional Z-Scores.
+        Build (N_time, J_assets, N_feats) tensor of cross-sectional z-scores and lag-1 momentum.
         """
-        tickers = features_df.columns.get_level_values(1).unique()
-        N_time = len(features_df)
-        J_assets = len(tickers)
+        if features_df is None or features_df.empty:
+            return np.zeros((0, 0, 1), dtype=np.float64)
 
+        # Ensure we know the ordered list of base feature names
         if not self.feature_names:
             self.feature_names = list(features_df.columns.get_level_values(0).unique())
 
+        tickers = features_df.columns.get_level_values(1).unique()
+        N_time = len(features_df)
+        J_assets = len(tickers)
         feature_matrices = []
 
         for feat in self.feature_names:
-            if feat in features_df.columns.levels[0]:
-                raw_mat = features_df[feat].astype(np.float64).fillna(0.0).to_numpy()
+            try:
+                raw = features_df[feat].astype(np.float64).to_numpy()
+            except Exception:
+                raw = np.zeros((N_time, J_assets), dtype=np.float64)
 
-                # Feature 1: Cross-Sectional Z-Score (Relative Value)
-                row_mean = raw_mat.mean(axis=1, keepdims=True)
-                row_std = raw_mat.std(axis=1, keepdims=True) + self.epsilon
-                z_score = (raw_mat - row_mean) / row_std
-                feature_matrices.append(z_score)
+            # Cross-sectional z-score (market-relative)
+            row_mean = np.nanmean(raw, axis=1, keepdims=True)
+            row_std = np.nanstd(raw, axis=1, keepdims=True)
+            row_std = np.where(row_std < self.epsilon, self.epsilon, row_std)
+            z = (raw - row_mean) / row_std
+            z = np.nan_to_num(z, nan=0.0, posinf=0.0, neginf=0.0)
+            z = np.clip(z, -3.0, 3.0)
+            feature_matrices.append(z)
 
-                # Feature 2: Momentum (Directional Change over Time)
-                if N_time > 0:
-                    mom = np.zeros_like(raw_mat)
-                    mom[1:] = raw_mat[1:] - raw_mat[:-1]
-                    feature_matrices.append(mom)
-                else:
-                    feature_matrices.append(np.zeros_like(raw_mat))
+            # Simple lag-1 momentum
+            mom = np.zeros_like(raw)
+            if N_time > 1:
+                mom[1:] = raw[1:] - raw[:-1]
+            mom = np.nan_to_num(mom, nan=0.0, posinf=0.0, neginf=0.0)
+            feature_matrices.append(mom)
 
         if not feature_matrices:
-            return np.zeros((N_time, J_assets, 1))
+            return np.zeros((N_time, J_assets, 1), dtype=np.float64)
 
-        # Shape: (N_time, J_assets, N_features)
         return np.stack(feature_matrices, axis=-1)
 
     def train(self, features: pd.DataFrame, target: pd.DataFrame) -> None:
-        """
-        Trains global predictive parameters across the pooled asset-time universe.
-        """
         if features is None or features.empty or target is None or target.empty:
+            self.is_trained = False
             return
 
         self.feature_names = list(features.columns.get_level_values(0).unique())
@@ -78,79 +75,88 @@ class MyPredictor(Predictor):
         features_sorted = features.sort_index(ascending=True)
         target_sorted = target.sort_index(ascending=True)
 
+        # Align on common index / columns if necessary
+        common_idx = features_sorted.index.intersection(target_sorted.index)
+        if len(common_idx) == 0:
+            self.is_trained = False
+            return
+
+        features_sorted = features_sorted.loc[common_idx]
+        target_sorted = target_sorted.loc[common_idx]
+
         X_tensor = self._engineer_features(features_sorted)
         y_matrix = target_sorted.astype(np.float64).fillna(0.0).to_numpy()
 
-        N_time, J_assets, N_feats = X_tensor.shape
+        if X_tensor.size == 0 or y_matrix.size == 0:
+            self.is_trained = False
+            return
 
-        # Pool rows and columns together to ensure the model generalizes across assets
+        N_time, J_assets, N_feats = X_tensor.shape
         X_flat = X_tensor.reshape(-1, N_feats)
         y_flat = y_matrix.reshape(-1)
 
-        # Fit the regularized ridge model to learn actual predictive weights
-        self.model.fit(X_flat, y_flat)
+        # Drop any remaining non-finite rows
+        mask = np.isfinite(X_flat).all(axis=1) & np.isfinite(y_flat)
+        if mask.sum() < 10:
+            self.is_trained = False
+            return
+
+        self.model.fit(X_flat[mask], y_flat[mask])
         self.is_trained = True
 
     def predict(self, features: pd.DataFrame) -> pd.DataFrame:
+        if features is None or features.empty:
+            return pd.DataFrame()
+
         features_sorted = features.sort_index(ascending=True)
         tickers = features_sorted.columns.get_level_values(1).unique()
-        zero_signal = pd.DataFrame(0.0, index=features_sorted.index, columns=tickers, dtype=np.float32)
-
-        if len(features_sorted) == 0:
-            return zero_signal
+        zero_signal = pd.DataFrame(
+            0.0, index=features_sorted.index, columns=tickers, dtype=np.float32
+        )
 
         try:
             X_tensor = self._engineer_features(features_sorted)
+            if X_tensor.size == 0:
+                return zero_signal
+
             N_time, J_assets, N_feats = X_tensor.shape
 
-            # Use trained model predictions if available; fallback to flat weights if not
-            if self.is_trained:
+            if self.is_trained and hasattr(self.model, "coef_"):
                 X_flat = X_tensor.reshape(-1, N_feats)
                 raw_preds = self.model.predict(X_flat)
                 alpha_raw = raw_preds.reshape(N_time, J_assets)
             else:
-                alpha_raw = X_tensor[..., 0] * 0.01  # Fallback to a minor scale of the baseline feature
+                # Fallback: use first engineered feature (z-score) lightly scaled
+                alpha_raw = X_tensor[..., 0] * 0.05
 
-            # Market-Neutral Transformation: Zero out cross-sectional mean
-            alpha_demeaned = alpha_raw - alpha_raw.mean(axis=1, keepdims=True)
+            # Market-neutral: demean cross-sectionally
+            alpha_demeaned = alpha_raw - np.nanmean(alpha_raw, axis=1, keepdims=True)
+            alpha_demeaned = np.nan_to_num(alpha_demeaned, nan=0.0)
 
-            # Scale allocations to meet tournament concentration standards
-            row_norms = np.linalg.norm(alpha_demeaned, axis=1, keepdims=True) + self.epsilon
+            # L2 normalize each row then scale
+            row_norms = np.linalg.norm(alpha_demeaned, axis=1, keepdims=True)
+            row_norms = np.where(row_norms < self.epsilon, self.epsilon, row_norms)
             target_signals = (alpha_demeaned / row_norms) * self.optimal_concentration
 
-            # Smooth allocations over time rows to reduce execution churn
-            smoothed_positions = np.zeros_like(target_signals)
-            if (
-                self.prev_signal is not None
-                and self.prev_signal.shape == (J_assets,)
-                and self.prev_tickers is not None
-                and self.prev_tickers.equals(tickers)
-            ):
-                active_allocation = self.prev_signal.copy()
-            else:
-                active_allocation = np.zeros(J_assets, dtype=np.float64)
-
+            # Simple intra-batch exponential smoothing (stateless across calls)
+            decay = 0.65
+            smoothed = np.zeros_like(target_signals)
+            prev = np.zeros(J_assets, dtype=np.float64)
             for t in range(N_time):
-                target_allocation = target_signals[t]
-                if np.all(np.abs(target_allocation) < 1e-10):
-                    current_allocation = active_allocation.copy()
-                else:
-                    current_allocation = (self.decay * target_allocation) + ((1.0 - self.decay) * active_allocation)
+                curr = decay * target_signals[t] + (1.0 - decay) * prev
+                curr = curr - curr.mean()          # keep neutral
+                smoothed[t] = curr
+                prev = curr
 
-                current_allocation -= current_allocation.mean()
-                smoothed_positions[t] = current_allocation
-                active_allocation = current_allocation.copy()
-
-            self.prev_signal = smoothed_positions[-1].copy()
-            self.prev_tickers = tickers.copy()
-
-            # Final output formatting with strict clipping boundaries
-            final_df = pd.DataFrame(smoothed_positions, index=features_sorted.index, columns=tickers)
+            final_df = pd.DataFrame(
+                smoothed, index=features_sorted.index, columns=tickers
+            )
             final_df = final_df.clip(-self.target_bound, self.target_bound)
+            final_df = final_df.reindex(index=features.index, columns=tickers).fillna(0.0)
 
-            return final_df.reindex(index=features.index).astype(np.float32)
+            return final_df.astype(np.float32)
 
         except Exception:
-            return zero_signal
+            return zero_signal.reindex(index=features.index).fillna(0.0).astype(np.float32)
 
 predictor = MyPredictor()
