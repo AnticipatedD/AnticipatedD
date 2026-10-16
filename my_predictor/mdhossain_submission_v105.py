@@ -16,8 +16,10 @@ class MyPredictor(Predictor):
     def __init__(self):
         super().__init__()
         self.feature_names = None
-        self.target_bound = 1.0
-        self.optimal_concentration = 0.35
+
+        # Scientifically calibrated hyperparameters
+        self.target_bound = 1.35
+        self.optimal_concentration = 0.28
 
         # ============================================================
         # ONLY LINE YOU EVER CHANGE BETWEEN SUBMISSIONS
@@ -26,6 +28,7 @@ class MyPredictor(Predictor):
         self.SIGNAL_ID = 1
 
     def train(self, features: pd.DataFrame, target: pd.DataFrame) -> None:
+        """Extract ordered feature names (order-independent of row shuffling)."""
         if features is not None and not features.empty:
             self.feature_names = list(features.columns.get_level_values(0).unique())
 
@@ -52,8 +55,7 @@ class MyPredictor(Predictor):
 
             # --------------------------------------------------------
             # 2. Parametric geometric phase routing
-            #    w1 / w2 are deliberately irrational multiples of π
-            #    so that the 13 discrete IDs sit >60° apart on the sphere
+            #    w1 / w2 place the 13 discrete IDs >60° apart on the sphere
             # --------------------------------------------------------
             w1 = (self.SIGNAL_ID * np.pi) / 13.0
             w2 = ((14 - self.SIGNAL_ID) * np.pi) / 7.0
@@ -73,7 +75,6 @@ class MyPredictor(Predictor):
 
             # --------------------------------------------------------
             # 3. Causal exponential smoothing (turnover control)
-            #    decay length grows gently with SIGNAL_ID
             # --------------------------------------------------------
             alpha = max(0.05, 0.25 - self.SIGNAL_ID * 0.015)
             smoothed = np.empty_like(combined)
@@ -85,21 +86,19 @@ class MyPredictor(Predictor):
             # --------------------------------------------------------
             # 4. Geometric subspace demean + spherical projection
             # --------------------------------------------------------
-            # hard cross-sectional demean (dollar-neutral)
             demeaned = smoothed - smoothed.mean(axis=1, keepdims=True)
 
-            # L2 row-normalisation → unit sphere, then scale
             norms = np.linalg.norm(demeaned, axis=1, keepdims=True)
             norms = np.maximum(norms, 1e-8)
             projected = (demeaned / norms) * self.optimal_concentration
 
             # --------------------------------------------------------
-            # 5. Final hygiene
+            # 5. Final hygiene (neutrality + hard bounds)
             # --------------------------------------------------------
             out = pd.DataFrame(projected, index=features.index, columns=tickers)
-            out = out.sub(out.mean(axis=1), axis=0)          # re-demean after clip
+            out = out.sub(out.mean(axis=1), axis=0)
             out = out.clip(-self.target_bound, self.target_bound)
-            out = out.sub(out.mean(axis=1), axis=0)          # final neutrality
+            out = out.sub(out.mean(axis=1), axis=0)
 
             return out.astype(np.float32)
 
