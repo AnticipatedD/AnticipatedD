@@ -51,7 +51,7 @@ As the founder and leader of **Vane Enterprise LLC**, I drive innovation through
 From Association of Business Practitioners (ABP). London, UK.
 - **Bachelor Of Business Administration (B.B.A)**:
 From University of Madras, Chennai. India.
-- **Certified IMS Logical Relationships**: Dedicated and Partner Plus relationship building up with IMB Technical Talent.
+- **Certified IMS Logical Relationships**: Dedicated and Partner Plus relationship building up with IBM Technical Talent.
 - **Business Owner & Entrepreneur**: Founded and scaled Vane Enterprise LLC.
 - **Offshore Architecture Engineer**: Designed complex systems for Amazon, Google, and enterprise clients.
 - **Google Admin Console Expert**: Certified holder of Chrome Enterprise and Android Enterprise setup certifications.
