@@ -13,49 +13,170 @@ from predictor import Predictor
 
 class MyPredictor(Predictor):
     """
-    CITY_NEW01
+    Target-aligned cross-sectional ridge-style rank ensemble.
 
-    A structurally different signal family:
-    - cross-sectional rank features
-    - feature residualization
-    - nonlinear rank contrasts
-    - temporal rank changes
-    - spherical normalization
-    - moderate causal smoothing
-
-    This intentionally avoids the previous:
-    tanh + sin/cos pairwise + r*abs(r) construction.
+    Uses the training target to estimate feature directions and weights.
+    The final prediction remains cross-sectionally demeaned and bounded.
     """
 
     def __init__(self):
         super().__init__()
 
         self.feature_names = None
+        self.feature_weights = None
         self.prev_signal = None
         self.prev_tickers = None
 
         self.target_bound = 1.35
-        self.optimal_concentration = 0.28
-        self.l1_hysteresis_threshold = 0.78
-        self.update_fraction = 0.32
+        self.output_scale = 0.22
+        self.turnover_threshold = 0.70
+        self.update_fraction = 0.35
+        self.ridge = 0.08
+        self.minimum_weight = 0.05
+
+    def _rank_matrix(self, block):
+        values = block.astype(np.float64)
+
+        ranked = (
+            values.rank(
+                axis=1,
+                pct=True,
+                method="average",
+            )
+            - 0.5
+        ) * 2.0
+
+        return ranked.fillna(0.0).to_numpy()
+
+    def _target_array(self, target, index):
+        if target is None:
+            return None
+
+        if isinstance(target, pd.DataFrame):
+            if target.shape[1] == 1:
+                result = target.iloc[:, 0]
+            else:
+                result = target.mean(axis=1)
+        elif isinstance(target, pd.Series):
+            result = target
+        else:
+            result = pd.Series(
+                np.asarray(target).reshape(-1),
+                index=index,
+            )
+
+        result = result.reindex(index)
+        return result.astype(np.float64).to_numpy()
 
     def train(
         self,
         features: pd.DataFrame,
         target: pd.DataFrame = None,
     ) -> None:
+        self.feature_names = None
+        self.feature_weights = None
+
         if features is None or features.empty:
-            self.feature_names = None
             return
 
         try:
-            self.feature_names = list(
+            names = list(
                 features.columns
                 .get_level_values(0)
                 .unique()
             )
+
+            y = self._target_array(
+                target,
+                features.index,
+            )
+
+            if y is None or len(y) != len(features):
+                self.feature_names = names
+                return
+
+            y = np.nan_to_num(
+                y,
+                nan=0.0,
+                posinf=0.0,
+                neginf=0.0,
+            )
+
+            y = y - np.mean(y)
+            y_scale = np.std(y)
+
+            if y_scale < 1e-12:
+                self.feature_names = names
+                return
+
+            y = y / y_scale
+
+            weights = {}
+            usable_names = []
+
+            available = set(
+                features.columns.get_level_values(0)
+            )
+
+            for name in names:
+                if name not in available:
+                    continue
+
+                x = self._rank_matrix(
+                    features[name]
+                )
+
+                x = np.nan_to_num(
+                    x,
+                    nan=0.0,
+                    posinf=0.0,
+                    neginf=0.0,
+                )
+
+                x_mean = x.mean(axis=1)
+                x_mean = x_mean - x_mean.mean()
+
+                x_scale = np.std(x_mean)
+
+                if x_scale < 1e-10:
+                    continue
+
+                x_mean = x_mean / x_scale
+
+                covariance = np.mean(
+                    x_mean * y
+                )
+
+                weight = covariance / (
+                    1.0 + self.ridge
+                )
+
+                if abs(weight) >= self.minimum_weight:
+                    weights[name] = weight
+                    usable_names.append(name)
+
+            self.feature_names = usable_names
+
+            if not weights:
+                self.feature_weights = None
+                return
+
+            total = sum(
+                abs(value)
+                for value in weights.values()
+            )
+
+            if total > 1e-12:
+                weights = {
+                    key: value / total
+                    for key, value in weights.items()
+                }
+
+            self.feature_weights = weights
+
         except Exception:
             self.feature_names = None
+            self.feature_weights = None
 
     def predict(
         self,
@@ -80,8 +201,8 @@ class MyPredictor(Predictor):
         if (
             features is None
             or features.empty
-            or self.feature_names is None
-            or len(self.feature_names) < 2
+            or not self.feature_names
+            or not self.feature_weights
         ):
             return zero_signal
 
@@ -90,111 +211,64 @@ class MyPredictor(Predictor):
                 features.columns.get_level_values(0)
             )
 
-            rank_blocks = []
+            raw = np.zeros(
+                (len(features), len(tickers)),
+                dtype=np.float64,
+            )
+
+            total_abs_weight = 0.0
 
             for name in self.feature_names:
                 if name not in available:
                     continue
 
-                values = features[name].astype(np.float64)
-
-                ranked = (
-                    values.rank(
-                        axis=1,
-                        pct=True,
-                        method="average",
-                    )
-                    - 0.5
-                ) * 2.0
-
-                rank_blocks.append(
-                    ranked.fillna(0.0).to_numpy()
+                weight = self.feature_weights.get(
+                    name,
+                    0.0,
                 )
 
-            if len(rank_blocks) < 2:
+                if abs(weight) < 1e-12:
+                    continue
+
+                block = self._rank_matrix(
+                    features[name]
+                )
+
+                raw += weight * block
+                total_abs_weight += abs(weight)
+
+            if total_abs_weight < 1e-12:
                 return zero_signal
 
-            rank_cube = np.stack(
-                rank_blocks,
-                axis=0,
-            )
-
-            n_features, n_time, n_assets = (
-                rank_cube.shape
-            )
-
-            # Feature-wise cross-sectional residualization.
-            # This removes the common component shared by all
-            # anonymized features and emphasizes disagreement.
-            feature_mean = rank_cube.mean(
-                axis=0,
-                keepdims=True,
-            )
-
-            residuals = rank_cube - feature_mean
-
-            # Nonlinear contrast:
-            # positive disagreement is emphasized differently
-            # from negative disagreement.
-            contrast = (
-                residuals
-                * np.abs(residuals)
-            )
-
-            contrast_signal = contrast.mean(
-                axis=0
-            )
-
-            # Add a second-order feature-agreement component.
-            # This is not the old pairwise sin/cos family.
-            squared_centered = (
-                rank_cube ** 2
-                - (rank_cube ** 2).mean(
-                    axis=0,
-                    keepdims=True,
-                )
-            )
-
-            curvature_signal = squared_centered.mean(
-                axis=0
-            )
-
-            raw = (
-                0.72 * contrast_signal
-                + 0.28 * curvature_signal
-            )
-
-            # Temporal change in the ranked cross-sectional signal.
-            # The first row has no prior observation.
-            temporal = np.zeros_like(raw)
-
-            if n_time > 1:
-                temporal[1:] = (
-                    rank_cube.mean(axis=0)[1:]
-                    - rank_cube.mean(axis=0)[:-1]
-                )
-
-            raw = raw + 0.22 * temporal
-
-            # Cross-sectional dollar neutrality.
             raw -= raw.mean(
                 axis=1,
                 keepdims=True,
             )
 
-            norms = np.linalg.norm(
-                raw,
+            # Robust row scaling without forcing every row
+            # to have identical spherical magnitude.
+            row_scale = np.nanpercentile(
+                np.abs(raw),
+                75,
                 axis=1,
                 keepdims=True,
             )
 
-            target_positions = (
-                raw / np.maximum(norms, 1e-8)
-            ) * self.optimal_concentration
-
-            output = np.zeros_like(
-                target_positions
+            raw = raw / np.maximum(
+                row_scale,
+                1e-8,
             )
+
+            raw = np.tanh(raw)
+            raw -= raw.mean(
+                axis=1,
+                keepdims=True,
+            )
+
+            desired = raw * self.output_scale
+
+            n_time, n_assets = desired.shape
+            output = np.zeros_like(desired)
 
             if (
                 self.prev_signal is not None
@@ -210,24 +284,26 @@ class MyPredictor(Predictor):
                 )
 
             for t in range(n_time):
-                desired = target_positions[t]
+                target_position = desired[t]
 
-                distance = np.sum(
-                    np.abs(desired - active)
+                movement = np.sum(
+                    np.abs(
+                        target_position
+                        - active
+                    )
                 )
 
-                if distance <= self.l1_hysteresis_threshold:
+                if movement <= self.turnover_threshold:
                     current = active.copy()
                 else:
                     current = (
                         (1.0 - self.update_fraction)
                         * active
                         + self.update_fraction
-                        * desired
+                        * target_position
                     )
 
-                    current -= current.mean()
-
+                current -= current.mean()
                 output[t] = current
                 active = current.copy()
 
@@ -235,11 +311,6 @@ class MyPredictor(Predictor):
                 output,
                 index=features.index,
                 columns=tickers,
-            )
-
-            result = result.sub(
-                result.mean(axis=1),
-                axis=0,
             )
 
             result = result.clip(
