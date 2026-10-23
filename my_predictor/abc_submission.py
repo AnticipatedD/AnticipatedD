@@ -4,226 +4,336 @@
 #   "pandas",
 # ]
 # ///
+
 import numpy as np
 import pandas as pd
+
 from predictor import Predictor
+
 
 class MyPredictor(Predictor):
     """
-    Production-ready MyPredictor for AlphaNova portal.
+    Target-aligned cross-sectional ridge-style rank ensemble.
 
-    - Features native support for MultiIndex DataFrames, flat frames, or 3D ndarrays (T, J, F).
-    - train(features, target) fits internal state using an L2 regularized Ridge estimator.
-    - predict(features) returns np.ndarray shape (T, J) dtype float32 with per-row mean approximately zero.
-    - Robust execution logic completely clears the platform's row-padding checks.
+    Uses the training target to estimate feature directions and weights.
+    The final prediction remains cross-sectionally demeaned and bounded.
     """
 
-    def __init__(self, dtype=np.float32):
+    def __init__(self):
         super().__init__()
-        self.is_trained = False
-        self.n_assets = None
-        self.n_features = None
-        self.dtype = dtype
 
-        # Robust scaler applied to flat rows = samples (T*J)
-        self.feature_scaler = RobustScaler(quantile_range=(15.0, 85.0))
+        self.feature_names = None
+        self.feature_weights = None
+        self.prev_signal = None
+        self.prev_tickers = None
 
-        # Ridge regression state
-        self.coefficients = None
-        self.intercept = None
-        self.target_mean = 0.0
-        self.target_std = 1.35
+        self.target_bound = 1.35
+        self.output_scale = 0.22
+        self.turnover_threshold = 0.70
+        self.update_fraction = 0.35
+        self.ridge = 0.08
+        self.minimum_weight = 0.05
 
-        # Turnover control (EMA tracking)
-        self.alpha_smooth = 0.20
-        self._prev_signal = None
+    def _rank_matrix(self, block):
+        values = block.astype(np.float64)
 
-        # Numerical epsilon bounds
-        self._eps = 1e-8
+        ranked = (
+            values.rank(
+                axis=1,
+                pct=True,
+                method="average",
+            )
+            - 0.5
+        ) * 2.0
 
-    # ------------------------------------------------------------------
-    # Validation and Parsing Core
-    # ------------------------------------------------------------------
-    def _validate_input(self, features, target):
-        """Verifies structural properties of raw incoming variables."""
-        if features is None or (hasattr(features, 'size') and features.size == 0) or (hasattr(features, 'empty') and features.empty):
-            raise ValueError("Input features matrix cannot be empty or None.")
+        return ranked.fillna(0.0).to_numpy()
+
+    def _target_array(self, target, index):
         if target is None:
-            raise ValueError("Training targets array cannot be None.")
+            return None
 
-    def _extract_tensors_and_target(self, features, target, allow_no_target=False):
-        """
-        Parses long formats or MultiIndex arrays into explicit shapes:
-        X_raw -> Shape (T*J, F), target -> Shape (T*J,). Returns (X_raw, target, T, J)
-        """
-        # Scenario A: Input is a standard multi-indexed pandas structure
-        if isinstance(features, pd.DataFrame):
-            if isinstance(features.columns, pd.MultiIndex):
-                # Unstack features to uncover unique asset and period lengths
-                feat_unstacked = features.iloc[:, 0].unstack(level=1)
-                T, J = feat_unstacked.shape
-                F = len(features.columns.get_level_values(0).unique())
-                
-                # Sort features systematically to flatten tracking layout into a 2D layout
-                X_list = []
-                for feat in features.columns.get_level_values(0).unique():
-                    X_list.append(features[feat].unstack(level=1).to_numpy())
-                # Shape becomes (T, J, F), reshape down to long format (T*J, F)
-                X_raw = np.stack(X_list, axis=2).reshape(T * J, F)
+        if isinstance(target, pd.DataFrame):
+            if target.shape[1] == 1:
+                result = target.iloc[:, 0]
             else:
-                # Flat matrix layout format
-                T = len(features)
-                J = len(features.columns)
-                F = 1
-                X_raw = features.to_numpy().reshape(T * J, F)
-        
-        # Scenario B: Input is already an explicit 3D tensor ndarray (T, J, F)
-        elif isinstance(features, np.ndarray) and features.ndim == 3:
-            T, J, F = features.shape
-            X_raw = features.reshape(T * J, F)
+                result = target.mean(axis=1)
+        elif isinstance(target, pd.Series):
+            result = target
         else:
-            # Fallback parsing strategy for arbitrary shapes
-            arr = np.atleast_2d(np.asarray(features))
-            T, F = arr.shape
-            J = 1
-            X_raw = arr
-
-        # Parse target values securely if supplied
-        y_arr = None
-        if target is not None:
-            if isinstance(target, (pd.DataFrame, pd.Series)):
-                y_arr = target.to_numpy().ravel()
-            else:
-                y_arr = np.asarray(target).ravel()
-                
-            # Truncate mismatch bounds or force alignment vectors
-            if y_arr.size != T * J:
-                # Re-align sample tracking to match features dimension footprint
-                y_arr = np.resize(y_arr, (T * J,))
-        elif not allow_no_target:
-            raise ValueError("Target calculation mismatch during execution phase.")
-
-        return X_raw, y_arr, T, J
-
-    def _engineer_features(self, X_raw: np.ndarray) -> np.ndarray:
-        """
-        Generates robust non-linear interactions natively on the flattened (T*J, F) arrays.
-        Bypasses time-group dependency bounds.
-        """
-        n_samples, n_feats = X_raw.shape
-        blocks = [X_raw, np.tanh(X_raw), np.sin(X_raw * 0.5)]
-        
-        # Inter-feature cross products if dimensions permit
-        if n_feats >= 2:
-            for i in range(n_feats):
-                for j in range(i + 1, n_feats):
-                    blocks.append((X_raw[:, i] * X_raw[:, j]).reshape(-2.5, 2.5))
-                    blocks.append((X_raw[:, i] * np.abs(X_raw[:, j])).reshape(-2.5, 2.5))
-                    
-        return np.hstack(blocks)
-
-    # ------------------------------------------------------------------
-    # Fitting Core
-    # ------------------------------------------------------------------
-    def _fit_ridge_regression(self, X: np.ndarray, y: np.ndarray):
-        """Fits regularized model coefficients using standardized inputs."""
-        self.target_mean = float(np.mean(y))
-        self.target_std = float(np.std(y)) if np.std(y) > self._eps else 1.0
-        
-        y_scaled = (y - self.target_mean) / self.target_std
-        
-        # Fit regularized Ridge matrix to clear the shuffling overfitting gate
-        reg = Ridge(alpha=0.05, fit_intercept=True)
-        reg.fit(X, y_scaled)
-        
-        self.coefficients = reg.coef_
-        self.intercept = reg.intercept_
-
-    def train(self, features, target):
-        """Train the predictor."""
-        try:
-            self._validate_input(features, target)
-
-            X_raw, y_arr, T, J = self._extract_tensors_and_target(features, target)
-
-            X_eng = self._engineer_features(X_raw).astype(self.dtype, copy=False)
-
-            X_norm = self.feature_scaler.fit_transform(X_eng)
-            X_norm = np.clip(X_norm, -8.0, 8.0)
-
-            self._fit_ridge_regression(X_norm, y_arr)
-
-            self.n_assets = J
-            self.n_features = X_eng.shape[1]
-            self.is_trained = True
-
-        except Exception as e:
-            print("TRAINING ERROR: Exception during train()", file=sys.stderr)
-            traceback.print_exc(file=sys.stderr)
-            raise RuntimeError(f"Training failed: {e}") from e 
-            # ----------------------------------------------------------
-            # 4. (Continued) Handle missing values safely post-demeaning
-            # ----------------------------------------------------------
-            raw_signal = np.nan_to_num(raw_signal, nan=0.0)
-
-            # ----------------------------------------------------------
-            # 5. Coordinate sphere L2 normalization execution
-            # ----------------------------------------------------------
-            norms = np.linalg.norm(raw_signal, axis=1, keepdims=True)
-            norms = np.where(norms < 1e-8, 1.0, norms)
-            target_signal = (raw_signal / norms) * self.optimal_concentration
-
-            # ----------------------------------------------------------
-            # 6. Causal portfolio execution loop controlled via L1 hysteresis bounds
-            # ----------------------------------------------------------
-            n_time, n_assets = target_signal.shape
-            final_positions = np.zeros_like(target_signal)
-
-            state_valid = (
-                self.prev_signal_series is not None
-                and hasattr(self.prev_signal_series, "index")
-                and self.prev_signal_series.shape == (n_assets,)
+            result = pd.Series(
+                np.asarray(target).reshape(-1),
+                index=index,
             )
 
-            if state_valid:
-                active_position = self.prev_signal_series.reindex(tickers, fill_value=0.0).to_numpy(dtype=np.float64)
-            else:
-                active_position = np.zeros(n_assets, dtype=np.float64)
+        result = result.reindex(index)
+        return result.astype(np.float64).to_numpy()
 
-            for t in range(n_time):
-                target_position = target_signal[t]
-                l1_allocation_delta = np.sum(np.abs(target_position - active_position))
+    def train(
+        self,
+        features: pd.DataFrame,
+        target: pd.DataFrame = None,
+    ) -> None:
+        self.feature_names = None
+        self.feature_weights = None
 
-                if l1_allocation_delta < self.l1_hysteresis_threshold:
-                    current_allocation = active_position.copy()
-                else:
-                    # Adaptive smoothing factor to mitigate the hourly 5 bp turnover cost drag
-                    current_allocation = 0.28 * target_position + 0.72 * active_position
-                    current_allocation -= current_allocation.mean()
+        if features is None or features.empty:
+            return
 
-                final_positions[t] = current_allocation
-                active_position = current_allocation.copy()
+        try:
+            names = list(
+                features.columns
+                .get_level_values(0)
+                .unique()
+            )
 
-            # ----------------------------------------------------------
-            # 7. Apply strict single-asset position caps
-            # ----------------------------------------------------------
-            final_positions = np.clip(final_positions, -self.target_bound, self.target_bound)
+            y = self._target_array(
+                target,
+                features.index,
+            )
 
-            # ----------------------------------------------------------
-            # 8. Final iterative projection loop to guarantee absolute dollar neutrality
-            # ----------------------------------------------------------
-            final_positions -= np.mean(final_positions, axis=1, keepdims=True)
+            if y is None or len(y) != len(features):
+                self.feature_names = names
+                return
 
-            final_df = pd.DataFrame(final_positions, index=features.index, columns=tickers)
+            y = np.nan_to_num(
+                y,
+                nan=0.0,
+                posinf=0.0,
+                neginf=0.0,
+            )
 
-            # ----------------------------------------------------------
-            # 9. Cache running streaming state for the next period checks
-            # ----------------------------------------------------------
-            if len(final_df) > 2:
-                self.prev_signal_series = final_df.iloc[-1].astype(np.float64)
+            y = y - np.mean(y)
+            y_scale = np.std(y)
 
-            return final_df.astype(np.float32)
+            if y_scale < 1e-12:
+                self.feature_names = names
+                return
+
+            y = y / y_scale
+
+            weights = {}
+            usable_names = []
+
+            available = set(
+                features.columns.get_level_values(0)
+            )
+
+            for name in names:
+                if name not in available:
+                    continue
+
+                x = self._rank_matrix(
+                    features[name]
+                )
+
+                x = np.nan_to_num(
+                    x,
+                    nan=0.0,
+                    posinf=0.0,
+                    neginf=0.0,
+                )
+
+                x_mean = x.mean(axis=1)
+                x_mean = x_mean - x_mean.mean()
+
+                x_scale = np.std(x_mean)
+
+                if x_scale < 1e-10:
+                    continue
+
+                x_mean = x_mean / x_scale
+
+                covariance = np.mean(
+                    x_mean * y
+                )
+
+                weight = covariance / (
+                    1.0 + self.ridge
+                )
+
+                if abs(weight) >= self.minimum_weight:
+                    weights[name] = weight
+                    usable_names.append(name)
+
+            self.feature_names = usable_names
+
+            if not weights:
+                self.feature_weights = None
+                return
+
+            total = sum(
+                abs(value)
+                for value in weights.values()
+            )
+
+            if total > 1e-12:
+                weights = {
+                    key: value / total
+                    for key, value in weights.items()
+                }
+
+            self.feature_weights = weights
 
         except Exception:
-            # AlphaNova competition-safe fallback path
+            self.feature_names = None
+            self.feature_weights = None
+
+    def predict(
+        self,
+        features: pd.DataFrame,
+    ) -> pd.DataFrame:
+        try:
+            tickers = (
+                features.columns
+                .get_level_values(1)
+                .unique()
+            )
+        except Exception:
+            tickers = pd.Index([])
+
+        zero_signal = pd.DataFrame(
+            0.0,
+            index=getattr(features, "index", []),
+            columns=tickers,
+            dtype=np.float32,
+        )
+
+        if (
+            features is None
+            or features.empty
+            or not self.feature_names
+            or not self.feature_weights
+        ):
             return zero_signal
+
+        try:
+            available = set(
+                features.columns.get_level_values(0)
+            )
+
+            raw = np.zeros(
+                (len(features), len(tickers)),
+                dtype=np.float64,
+            )
+
+            total_abs_weight = 0.0
+
+            for name in self.feature_names:
+                if name not in available:
+                    continue
+
+                weight = self.feature_weights.get(
+                    name,
+                    0.0,
+                )
+
+                if abs(weight) < 1e-12:
+                    continue
+
+                block = self._rank_matrix(
+                    features[name]
+                )
+
+                raw += weight * block
+                total_abs_weight += abs(weight)
+
+            if total_abs_weight < 1e-12:
+                return zero_signal
+
+            raw -= raw.mean(
+                axis=1,
+                keepdims=True,
+            )
+
+            # Robust row scaling without forcing every row
+            # to have identical spherical magnitude.
+            row_scale = np.nanpercentile(
+                np.abs(raw),
+                75,
+                axis=1,
+                keepdims=True,
+            )
+
+            raw = raw / np.maximum(
+                row_scale,
+                1e-8,
+            )
+
+            raw = np.tanh(raw)
+            raw -= raw.mean(
+                axis=1,
+                keepdims=True,
+            )
+
+            desired = raw * self.output_scale
+
+            n_time, n_assets = desired.shape
+            output = np.zeros_like(desired)
+
+            if (
+                self.prev_signal is not None
+                and self.prev_tickers is not None
+                and self.prev_signal.shape == (n_assets,)
+                and self.prev_tickers.equals(tickers)
+            ):
+                active = self.prev_signal.copy()
+            else:
+                active = np.zeros(
+                    n_assets,
+                    dtype=np.float64,
+                )
+
+            for t in range(n_time):
+                target_position = desired[t]
+
+                movement = np.sum(
+                    np.abs(
+                        target_position
+                        - active
+                    )
+                )
+
+                if movement <= self.turnover_threshold:
+                    current = active.copy()
+                else:
+                    current = (
+                        (1.0 - self.update_fraction)
+                        * active
+                        + self.update_fraction
+                        * target_position
+                    )
+
+                current -= current.mean()
+                output[t] = current
+                active = current.copy()
+
+            result = pd.DataFrame(
+                output,
+                index=features.index,
+                columns=tickers,
+            )
+
+            result = result.clip(
+                -self.target_bound,
+                self.target_bound,
+            )
+
+            result = result.sub(
+                result.mean(axis=1),
+                axis=0,
+            )
+
+            self.prev_signal = (
+                result.iloc[-1]
+                .to_numpy(dtype=np.float64)
+            )
+
+            self.prev_tickers = result.columns.copy()
+
+            return result.astype(np.float32)
+
+        except Exception:
+            return zero_signal
+
+
+predictor = MyPredictor()
