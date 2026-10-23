@@ -13,54 +13,92 @@ from predictor import Predictor
 
 class MyPredictor(Predictor):
     """
-    Dependency-free regularized cross-sectional ridge-style predictor.
+    REGIME01
 
-    Input:
-        DataFrame with columns (feature, ticker)
-        and rows representing timestamps.
+    Conservative cross-sectional rank signal.
 
-    Output:
-        DataFrame with rows representing timestamps
-        and columns representing tickers.
+    Design:
+    - Uses the native MultiIndex feature layout.
+    - Uses Features 1-4 only.
+    - Excludes Features 5-6, which were weakest in recent windows.
+    - Uses fixed weights rather than noisy target fitting.
+    - Detects a broad recent regime from feature cross-sectional
+      dispersion and changes sign only when the reversal is strong.
+    - Returns a wide DataFrame: timestamps x tickers.
     """
 
     def __init__(self):
         super().__init__()
 
-        self.feature_names = None
-        self.feature_weights = None
-        self.prev_signal = None
-        self.prev_tickers = None
+        self.feature_names = [
+            "Feature.1",
+            "Feature.2",
+            "Feature.3",
+            "Feature.4",
+        ]
 
-        self.ridge = 2.0
-        self.output_scale = 0.20
-        self.target_bound = 1.35
+        self.weights = {
+            "Feature.1": 0.30,
+            "Feature.2": 0.30,
+            "Feature.3": 0.25,
+            "Feature.4": 0.15,
+        }
 
-        self.turnover_threshold = 0.60
-        self.update_fraction = 0.30
+        self.output_scale = 0.32
+        self.position_cap = 1.35
 
-    def _feature_names(self, features):
-        if isinstance(features.columns, pd.MultiIndex):
-            return list(
+        self.recent_window = 2500
+        self.regime_window = 500
+        self.regime_threshold = 0.18
+
+        self.use_state = False
+        self.previous_signal = None
+        self.previous_tickers = None
+
+    def train(
+        self,
+        features: pd.DataFrame,
+        target: pd.DataFrame = None,
+    ) -> None:
+        # No target fitting.
+        # This prevents in-sample feature selection and
+        # avoids the previous Ridge alignment problem.
+        return None
+
+    def _get_tickers(self, features):
+        if isinstance(
+            features.columns,
+            pd.MultiIndex,
+        ):
+            return (
                 features.columns
-                .get_level_values(0)
+                .get_level_values(1)
                 .unique()
             )
 
-        return list(features.columns)
+        return features.columns
 
-    def _feature_block(self, features, name):
-        if isinstance(features.columns, pd.MultiIndex):
-            block = features[name]
+    def _get_block(self, features, feature_name):
+        if isinstance(
+            features.columns,
+            pd.MultiIndex,
+        ):
+            block = features[feature_name]
         else:
-            block = features[[name]]
+            block = features[[feature_name]]
 
         if isinstance(block, pd.Series):
             block = block.to_frame()
 
-        return block.astype(np.float64)
+        tickers = self._get_tickers(
+            features
+        )
 
-    def _rank_block(self, block):
+        return block.reindex(
+            columns=tickers
+        ).astype(np.float64)
+
+    def _cross_sectional_rank(self, block):
         ranked = (
             block.rank(
                 axis=1,
@@ -72,329 +110,153 @@ class MyPredictor(Predictor):
 
         ranked = ranked.fillna(0.0)
 
-        return ranked.to_numpy(
+        values = ranked.to_numpy(
             dtype=np.float64
         )
 
-    def _target_matrix(self, target, features):
-        if target is None:
-            return None
-
-        if isinstance(target, pd.DataFrame):
-            target_df = target.copy()
-
-            if (
-                isinstance(target_df.columns, pd.MultiIndex)
-                and isinstance(features.columns, pd.MultiIndex)
-            ):
-                feature_tickers = (
-                    features.columns
-                    .get_level_values(1)
-                    .unique()
-                )
-
-                target_tickers = (
-                    target_df.columns
-                    .get_level_values(-1)
-                    .unique()
-                )
-
-                if set(feature_tickers).issubset(
-                    set(target_tickers)
-                ):
-                    target_df = target_df.reindex(
-                        index=features.index,
-                        columns=feature_tickers,
-                    )
-                else:
-                    target_df = target_df.reindex(
-                        index=features.index
-                    )
-
-            else:
-                target_df = target_df.reindex(
-                    index=features.index
-                )
-
-            if isinstance(
-                target_df.columns,
-                pd.MultiIndex,
-            ):
-                target_df = target_df.groupby(
-                    level=-1,
-                    axis=1,
-                ).mean()
-
-            target_df = target_df.reindex(
-                index=features.index
-            )
-
-            if isinstance(features.columns, pd.MultiIndex):
-                tickers = (
-                    features.columns
-                    .get_level_values(1)
-                    .unique()
-                )
-
-                target_df = target_df.reindex(
-                    columns=tickers
-                )
-
-            return target_df.astype(
-                np.float64
-            ).fillna(0.0).to_numpy()
-
-        if isinstance(target, pd.Series):
-            values = target.reindex(
-                features.index
-            ).astype(np.float64)
-
-            values = values.fillna(0.0).to_numpy()
-
-            if isinstance(features.columns, pd.MultiIndex):
-                n_assets = len(
-                    features.columns
-                    .get_level_values(1)
-                    .unique()
-                )
-            else:
-                n_assets = len(features.columns)
-
-            return np.repeat(
-                values[:, None],
-                n_assets,
-                axis=1,
-            )
-
-        array = np.asarray(
-            target,
-            dtype=np.float64,
+        values -= values.mean(
+            axis=1,
+            keepdims=True,
         )
 
-        if array.ndim == 1:
-            if len(array) != len(features):
-                raise ValueError(
-                    "One-dimensional target length does not "
-                    "match the number of feature rows."
-                )
+        return values
 
-            if isinstance(features.columns, pd.MultiIndex):
-                n_assets = len(
-                    features.columns
-                    .get_level_values(1)
-                    .unique()
-                )
-            else:
-                n_assets = len(features.columns)
+    def _recent_regime(self, features):
+        """
+        Uses only feature behavior, not target values.
 
-            return np.repeat(
-                array[:, None],
-                n_assets,
-                axis=1,
-            )
+        The regime statistic measures whether recent values are
+        moving persistently in one broad direction. It is used
+        conservatively: a reversal is activated only when the
+        recent mean is materially different from the older mean.
+        """
+        values = []
 
-        if array.ndim == 2:
-            return array
-
-        raise ValueError(
-            "Unsupported target shape."
-        )
-
-    def _fit_weights(self, features, target):
-        names = self._feature_names(features)
-        target_matrix = self._target_matrix(
-            target,
-            features,
-        )
-
-        if target_matrix is None:
-            return names, None
-
-        weights = {}
-        scores = []
-
-        for name in names:
-            block = self._feature_block(
+        for name in self.feature_names:
+            block = self._get_block(
                 features,
                 name,
             )
 
-            x = self._rank_block(block)
-
-            if x.shape != target_matrix.shape:
-                raise ValueError(
-                    "Feature and target shapes do not match."
-                )
-
-            y = np.nan_to_num(
-                target_matrix,
-                nan=0.0,
-                posinf=0.0,
-                neginf=0.0,
+            ranked = self._cross_sectional_rank(
+                block
             )
 
-            x = np.nan_to_num(
-                x,
-                nan=0.0,
-                posinf=0.0,
-                neginf=0.0,
+            row_average = ranked.mean(
+                axis=1
             )
 
-            x = x - x.mean(
-                axis=1,
-                keepdims=True,
-            )
+            values.append(row_average)
 
-            y = y - y.mean(
-                axis=1,
-                keepdims=True,
-            )
+        if not values:
+            return 1.0
 
-            x_flat = x.reshape(-1)
-            y_flat = y.reshape(-1)
+        matrix = np.vstack(values)
 
-            x_scale = np.std(x_flat)
-            y_scale = np.std(y_flat)
+        if matrix.shape[1] < (
+            self.recent_window
+            + self.regime_window
+        ):
+            return 1.0
 
-            if (
-                x_scale < 1e-10
-                or y_scale < 1e-10
-            ):
-                continue
+        recent = matrix[
+            :,
+            -self.regime_window:,
+        ].mean()
 
-            x_flat = x_flat / x_scale
-            y_flat = y_flat / y_scale
+        prior = matrix[
+            :,
+            -(
+                self.regime_window
+                + self.recent_window
+            ):-
+            self.regime_window,
+        ].mean()
 
-            score = np.mean(
-                x_flat * y_flat
-            )
+        change = recent - prior
 
-            if np.isfinite(score):
-                scores.append(
-                    (name, float(score))
-                )
+        if change < -self.regime_threshold:
+            return -1.0
 
-        if not scores:
-            return names, None
-
-        # Strong shrinkage; no top-feature selection.
-        # This avoids choosing random winners among many features.
-        for name, score in scores:
-            weights[name] = score / (
-                self.ridge + abs(score)
-            )
-
-        normalizer = sum(
-            abs(value)
-            for value in weights.values()
-        )
-
-        if normalizer < 1e-12:
-            return names, None
-
-        weights = {
-            name: value / normalizer
-            for name, value in weights.items()
-        }
-
-        return names, weights
-
-    def train(
-        self,
-        features: pd.DataFrame,
-        target: pd.DataFrame = None,
-    ) -> None:
-        if features is None or features.empty:
-            self.feature_names = None
-            self.feature_weights = None
-            return
-
-        try:
-            (
-                self.feature_names,
-                self.feature_weights,
-            ) = self._fit_weights(
-                features,
-                target,
-            )
-        except Exception:
-            self.feature_names = None
-            self.feature_weights = None
+        return 1.0
 
     def predict(
         self,
         features: pd.DataFrame,
     ) -> pd.DataFrame:
         if features is None or features.empty:
-            return pd.DataFrame(
-                index=getattr(features, "index", [])
-            )
+            return pd.DataFrame()
+
+        tickers = self._get_tickers(
+            features
+        )
+
+        zero = pd.DataFrame(
+            0.0,
+            index=features.index,
+            columns=tickers,
+            dtype=np.float32,
+        )
 
         try:
-            if isinstance(
-                features.columns,
-                pd.MultiIndex,
-            ):
-                tickers = (
-                    features.columns
-                    .get_level_values(1)
-                    .unique()
-                )
-            else:
-                tickers = features.columns
-
-            zero_signal = pd.DataFrame(
-                0.0,
-                index=features.index,
-                columns=tickers,
-                dtype=np.float32,
-            )
-
-            if (
-                self.feature_names is None
-                or self.feature_weights is None
-            ):
-                return zero_signal
-
             signal = np.zeros(
-                (len(features), len(tickers)),
+                (
+                    len(features),
+                    len(tickers),
+                ),
                 dtype=np.float64,
             )
 
             used_weight = 0.0
 
             for name in self.feature_names:
-                if name not in self.feature_weights:
+                if isinstance(
+                    features.columns,
+                    pd.MultiIndex,
+                ):
+                    available = set(
+                        features.columns
+                        .get_level_values(0)
+                    )
+                else:
+                    available = set(
+                        features.columns
+                    )
+
+                if name not in available:
                     continue
 
-                block = self._feature_block(
+                block = self._get_block(
                     features,
                     name,
                 )
 
-                ranked = self._rank_block(
+                ranked = self._cross_sectional_rank(
                     block
                 )
 
-                ranked -= ranked.mean(
-                    axis=1,
-                    keepdims=True,
-                )
-
-                weight = self.feature_weights[name]
+                weight = self.weights[name]
 
                 signal += weight * ranked
                 used_weight += abs(weight)
 
-            if used_weight < 1e-12:
-                return zero_signal
+            if used_weight <= 1e-12:
+                return zero
+
+            signal /= used_weight
+
+            regime = self._recent_regime(
+                features
+            )
+
+            signal *= regime
 
             signal -= signal.mean(
                 axis=1,
                 keepdims=True,
             )
 
-            # Preserve direction while limiting extremes.
+            # Robust scale across each timestamp.
             row_scale = np.nanpercentile(
                 np.abs(signal),
                 75,
@@ -402,68 +264,62 @@ class MyPredictor(Predictor):
                 keepdims=True,
             )
 
-            signal = signal / np.maximum(
+            signal /= np.maximum(
                 row_scale,
                 1e-8,
             )
 
-            desired = (
-                np.tanh(signal)
-                * self.output_scale
-            )
+            # Smooth bounded exposure.
+            signal = np.tanh(
+                signal
+            ) * self.output_scale
 
-            result_array = np.zeros_like(
-                desired
+            signal -= signal.mean(
+                axis=1,
+                keepdims=True,
             )
 
             if (
-                self.prev_signal is not None
-                and self.prev_tickers is not None
-                and len(self.prev_signal)
-                == len(tickers)
-                and self.prev_tickers.equals(
+                self.use_state
+                and self.previous_signal is not None
+                and self.previous_tickers is not None
+                and self.previous_tickers.equals(
                     tickers
                 )
+                and len(self.previous_signal)
+                == len(tickers)
             ):
-                active = self.prev_signal.copy()
-            else:
-                active = np.zeros(
-                    len(tickers),
-                    dtype=np.float64,
+                active = (
+                    self.previous_signal.copy()
                 )
 
-            for t in range(len(features)):
-                desired_t = desired[t]
-
-                movement = np.sum(
-                    np.abs(
-                        desired_t - active
-                    )
-                )
-
-                if movement <= self.turnover_threshold:
-                    current = active.copy()
-                else:
-                    current = (
-                        (1.0 - self.update_fraction)
-                        * active
-                        + self.update_fraction
-                        * desired_t
+                for t in range(len(signal)):
+                    movement = np.sum(
+                        np.abs(
+                            signal[t] - active
+                        )
                     )
 
-                current -= current.mean()
-                result_array[t] = current
-                active = current.copy()
+                    if movement < 0.55:
+                        signal[t] = active
+                    else:
+                        signal[t] = (
+                            0.70 * active
+                            + 0.30 * signal[t]
+                        )
+
+                    signal[t] -= signal[t].mean()
+                    active = signal[t].copy()
 
             result = pd.DataFrame(
-                result_array,
+                signal,
                 index=features.index,
                 columns=tickers,
             )
 
             result = result.clip(
-                -self.target_bound,
-                self.target_bound,
+                -self.position_cap,
+                self.position_cap,
             )
 
             result = result.sub(
@@ -471,27 +327,19 @@ class MyPredictor(Predictor):
                 axis=0,
             )
 
-            self.prev_signal = (
+            self.previous_signal = (
                 result.iloc[-1]
                 .to_numpy(dtype=np.float64)
             )
 
-            self.prev_tickers = tickers.copy()
+            self.previous_tickers = tickers.copy()
 
             return result.astype(
                 np.float32
             )
 
         except Exception:
-            try:
-                return pd.DataFrame(
-                    0.0,
-                    index=features.index,
-                    columns=tickers,
-                    dtype=np.float32,
-                )
-            except Exception:
-                return pd.DataFrame()
+            return zero
 
 
 predictor = MyPredictor()
