@@ -13,7 +13,7 @@ from predictor import Predictor
 
 class MyPredictor(Predictor):
     """
-    REGIME01
+    REGIME05
 
     Conservative cross-sectional rank signal.
 
@@ -38,18 +38,18 @@ class MyPredictor(Predictor):
         ]
 
         self.weights = {
-            "Feature.1": 0.30,
-            "Feature.2": 0.30,
-            "Feature.3": 0.25,
+            "Feature.1": 0.20,
+            "Feature.2": 0.28,
+            "Feature.3": 0.32,
             "Feature.4": 0.15,
         }
 
-        self.output_scale = 0.32
+        self.output_scale = 0.20
         self.position_cap = 1.35
 
         self.recent_window = 2500
         self.regime_window = 500
-        self.regime_threshold = 0.18
+        self.regime_threshold = 0.25
 
         self.use_state = False
         self.previous_signal = None
@@ -96,7 +96,7 @@ class MyPredictor(Predictor):
 
         return block.reindex(
             columns=tickers
-        ).astype(np.float64)
+        ).astype(np.float32)
 
     def _cross_sectional_rank(self, block):
         ranked = (
@@ -111,7 +111,7 @@ class MyPredictor(Predictor):
         ranked = ranked.fillna(0.0)
 
         values = ranked.to_numpy(
-            dtype=np.float64
+            dtype=np.float32
         )
 
         values -= values.mean(
@@ -195,7 +195,7 @@ class MyPredictor(Predictor):
             0.0,
             index=features.index,
             columns=tickers,
-            dtype=np.float32,
+            dtype=np.float64,
         )
 
         try:
@@ -204,7 +204,7 @@ class MyPredictor(Predictor):
                     len(features),
                     len(tickers),
                 ),
-                dtype=np.float64,
+                dtype=np.float32,
             )
 
             used_weight = 0.0
@@ -240,7 +240,7 @@ class MyPredictor(Predictor):
                 signal += weight * ranked
                 used_weight += abs(weight)
 
-            if used_weight <= 1e-12:
+            if used_weight <= 1e-8:
                 return zero
 
             signal /= used_weight
@@ -259,14 +259,14 @@ class MyPredictor(Predictor):
             # Robust scale across each timestamp.
             row_scale = np.nanpercentile(
                 np.abs(signal),
-                75,
+                80,
                 axis=1,
                 keepdims=True,
             )
 
             signal /= np.maximum(
                 row_scale,
-                1e-8,
+                1e-9,
             )
 
             # Smooth bounded exposure.
@@ -300,12 +300,12 @@ class MyPredictor(Predictor):
                         )
                     )
 
-                    if movement < 0.55:
+                    if movement < 0.65:
                         signal[t] = active
                     else:
                         signal[t] = (
-                            0.70 * active
-                            + 0.30 * signal[t]
+                            0.80 * active
+                            + 0.20 * signal[t]
                         )
 
                     signal[t] -= signal[t].mean()
@@ -329,13 +329,13 @@ class MyPredictor(Predictor):
 
             self.previous_signal = (
                 result.iloc[-1]
-                .to_numpy(dtype=np.float64)
+                .to_numpy(dtype=np.float32)
             )
 
             self.previous_tickers = tickers.copy()
 
             return result.astype(
-                np.float32
+                np.float64
             )
 
         except Exception:
