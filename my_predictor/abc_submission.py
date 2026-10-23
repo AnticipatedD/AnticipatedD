@@ -15,14 +15,14 @@ from predictor import Predictor
 
 class MyPredictor(Predictor):
     """
-    Production-Grade Strategy with Dynamic Subspace Deflection.
-    Extracts ambient city dimensions from the live Parquet database 
-    and projects allocation trajectories orthogonal to occupied space.
+    Optimized Quant Strategy for AlphaNova Biweekly.
+    Applies aggressive causal turnover smoothing at the absolute final stage
+    to protect positive predictive edge from transaction fee drag.
     """
     def __init__(self):
         self.model = None
         self.feature_names = []
-        self.epsilon = 1e-12
+        self.epsilon = 1e-8
         
         # Hyperparameters optimized against the 5bp fee volatility drag
         self.params = {
@@ -37,8 +37,10 @@ class MyPredictor(Predictor):
             "nthread": 4,
         }
         self.n_rounds = 30
-        self.span = 120  
         self.target_concentration = 0.35  
+        self.ema_alpha = 0.05  # Restricts hourly turnover to minimize trading drag
+        self.prev_signal = None
+        self.prev_tickers = None
 
     @staticmethod
     def _csrank(df: pd.DataFrame) -> pd.DataFrame:
@@ -104,6 +106,7 @@ class MyPredictor(Predictor):
         raw_cols = features.columns.get_level_values(1).unique().tolist()
         tickers = sorted(raw_cols, key=lambda c: int(c.split('.')[-1]))
         J_assets = len(tickers)
+        N_time = len(timestamps)
         
         if J_assets == 0:
             return pd.DataFrame(0.0, index=timestamps, columns=tickers, dtype=np.float32)
@@ -117,10 +120,7 @@ class MyPredictor(Predictor):
             pred_series = pd.Series(raw_preds, index=X_df.index)
             pred_matrix = pred_series.unstack(level=1).reindex(columns=tickers, fill_value=0.0)
             
-            # 1. Causal position smoothing to reduce 5bp rebalancing drag
-            pred_matrix = pred_matrix.ewm(span=self.span, min_periods=1).mean()
-            
-            # 2. Demean cross-sectionally
+            # Demean raw predictions cross-sectionally before spatial geometric modifications
             pred_matrix = pred_matrix.sub(pred_matrix.mean(axis=1), axis=0)
             raw_signals = pred_matrix.to_numpy(dtype=np.float64)
             
@@ -131,40 +131,63 @@ class MyPredictor(Predictor):
             if os.path.exists(ambient_map_path):
                 try:
                     ambient_df = pd.read_parquet(ambient_map_path)
-                    # Dynamically look up the 19 spatial coordinate keys
                     dim_cols = [f"city_dim_{i}" for i in range(19) if f"city_dim_{i}" in ambient_df.columns]
                     if dim_cols and not ambient_df.empty:
                         occupied_vectors = ambient_df[dim_cols].to_numpy(dtype=np.float64)
                 except Exception:
                     pass
 
-            smoothed_signals = np.zeros_like(raw_signals)
+            sphere_targets = np.zeros_like(raw_signals)
             
-            for t in range(len(timestamps)):
+            # Step 1: Compute raw, deflected hypersphere targets for each time row
+            for t in range(N_time):
                 row_raw = raw_signals[t]
                 row_demeaned = row_raw - row_raw.mean()
                 
-                # Deflect the active raw vector orthogonal to every accepted target signal
+                # Deflect vector components orthogonal to existing crowd signal clusters
                 for occupied_city in occupied_vectors:
                     if occupied_city.shape[0] == J_assets:
                         city_norm = np.linalg.norm(occupied_city)
                         if city_norm > self.epsilon:
                             normalized_city = occupied_city / city_norm
-                            # Subtract parallel component to isolate independent alpha space
                             dot_prod = np.dot(row_demeaned, normalized_city)
                             row_demeaned -= dot_prod * normalized_city
                 
-                # Project remaining alpha residue back onto the S^{J-2} target concentration sphere
+                # Project onto the S^{J-2} target concentration space
                 row_norm = np.linalg.norm(row_demeaned)
                 if row_norm > self.epsilon:
-                    projected_row = (row_demeaned / row_norm) * self.target_concentration
+                    sphere_targets[t] = (row_demeaned / row_norm) * self.target_concentration
                 else:
-                    projected_row = np.zeros(J_assets, dtype=np.float64)
-                    
-                smoothed_signals[t] = projected_row
+                    sphere_targets[t] = np.zeros(J_assets, dtype=np.float64)
+            
+            # Step 2: Apply the portfolio turnover filter at the final step
+            final_positions = np.zeros_like(sphere_targets)
+            
+            if (
+                self.prev_signal is not None 
+                and self.prev_tickers is not None 
+                and self.prev_signal.shape == (J_assets,)
+                and self.prev_tickers == tickers
+            ):
+                active_position = self.prev_signal.copy()
+            else:
+                active_position = np.zeros(J_assets, dtype=np.float64)
                 
-            final_df = pd.DataFrame(smoothed_signals, index=timestamps, columns=tickers)
+            for t in range(N_time):
+                target_pos = sphere_targets[t]
+                # Filter high-frequency rebalancing friction directly across allocation matrices
+                current_allocation = (self.ema_alpha * target_pos) + ((1.0 - self.ema_alpha) * active_position)
+                current_allocation -= current_allocation.mean()  # Maintain zero-sum dollar neutrality
+                
+                final_positions[t] = current_allocation
+                active_position = current_allocation.copy()
+                
+            final_df = pd.DataFrame(final_positions, index=timestamps, columns=tickers)
             final_df = final_df.sub(final_df.mean(axis=1), axis=0)
+            
+            # Maintain cross-call state for backtest folds
+            self.prev_signal = final_df.iloc[-1].to_numpy(dtype=np.float64)
+            self.prev_tickers = tickers
             
             return final_df.astype(np.float32)
             
