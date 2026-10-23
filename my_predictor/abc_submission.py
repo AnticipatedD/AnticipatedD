@@ -13,10 +13,11 @@ from predictor import Predictor
 
 class MyPredictor(Predictor):
     """
-    Target-aligned cross-sectional ridge-style rank ensemble.
+    REGULARIZED01
 
-    Uses the training target to estimate feature directions and weights.
-    The final prediction remains cross-sectionally demeaned and bounded.
+    Conservative target-aligned rank ensemble intended to reduce
+    false discoveries and improve robustness in AlphaNova's
+    overfitting test.
     """
 
     def __init__(self):
@@ -24,21 +25,24 @@ class MyPredictor(Predictor):
 
         self.feature_names = None
         self.feature_weights = None
+
         self.prev_signal = None
         self.prev_tickers = None
 
+        self.output_scale = 0.18
         self.target_bound = 1.35
-        self.output_scale = 0.22
-        self.turnover_threshold = 0.70
-        self.update_fraction = 0.35
-        self.ridge = 0.08
-        self.minimum_weight = 0.05
 
-    def _rank_matrix(self, block):
-        values = block.astype(np.float64)
+        self.ridge = 1.50
+        self.keep_fraction = 0.25
+        self.min_abs_score = 0.04
 
+        self.turnover_threshold = 0.55
+        self.update_fraction = 0.25
+
+    def _rank(self, values):
         ranked = (
-            values.rank(
+            values.astype(np.float64)
+            .rank(
                 axis=1,
                 pct=True,
                 method="average",
@@ -48,25 +52,41 @@ class MyPredictor(Predictor):
 
         return ranked.fillna(0.0).to_numpy()
 
-    def _target_array(self, target, index):
+    def _target_vector(self, target, index):
         if target is None:
             return None
 
         if isinstance(target, pd.DataFrame):
             if target.shape[1] == 1:
-                result = target.iloc[:, 0]
+                y = target.iloc[:, 0]
             else:
-                result = target.mean(axis=1)
+                y = target.mean(axis=1)
         elif isinstance(target, pd.Series):
-            result = target
+            y = target
         else:
-            result = pd.Series(
+            y = pd.Series(
                 np.asarray(target).reshape(-1),
                 index=index,
             )
 
-        result = result.reindex(index)
-        return result.astype(np.float64).to_numpy()
+        y = y.reindex(index)
+        y = y.astype(np.float64).to_numpy()
+
+        y = np.nan_to_num(
+            y,
+            nan=0.0,
+            posinf=0.0,
+            neginf=0.0,
+        )
+
+        y -= y.mean()
+
+        scale = np.std(y)
+
+        if scale < 1e-10:
+            return None
+
+        return y / scale
 
     def train(
         self,
@@ -80,99 +100,95 @@ class MyPredictor(Predictor):
             return
 
         try:
-            names = list(
-                features.columns
-                .get_level_values(0)
-                .unique()
-            )
-
-            y = self._target_array(
+            y = self._target_vector(
                 target,
                 features.index,
             )
 
-            if y is None or len(y) != len(features):
-                self.feature_names = names
+            if y is None:
                 return
-
-            y = np.nan_to_num(
-                y,
-                nan=0.0,
-                posinf=0.0,
-                neginf=0.0,
-            )
-
-            y = y - np.mean(y)
-            y_scale = np.std(y)
-
-            if y_scale < 1e-12:
-                self.feature_names = names
-                return
-
-            y = y / y_scale
-
-            weights = {}
-            usable_names = []
 
             available = set(
                 features.columns.get_level_values(0)
             )
 
-            for name in names:
+            candidates = []
+
+            for name in features.columns.get_level_values(0).unique():
                 if name not in available:
                     continue
 
-                x = self._rank_matrix(
-                    features[name]
-                )
+                x = self._rank(features[name])
 
-                x = np.nan_to_num(
-                    x,
-                    nan=0.0,
-                    posinf=0.0,
-                    neginf=0.0,
-                )
+                # One robust cross-sectional summary per row.
+                x = x.mean(axis=1)
+                x -= x.mean()
 
-                x_mean = x.mean(axis=1)
-                x_mean = x_mean - x_mean.mean()
+                scale = np.std(x)
 
-                x_scale = np.std(x_mean)
-
-                if x_scale < 1e-10:
+                if scale < 1e-10:
                     continue
 
-                x_mean = x_mean / x_scale
+                x /= scale
 
-                covariance = np.mean(
-                    x_mean * y
+                score = np.mean(x * y)
+
+                if not np.isfinite(score):
+                    continue
+
+                candidates.append(
+                    (name, float(score))
                 )
 
-                weight = covariance / (
-                    1.0 + self.ridge
-                )
+            if not candidates:
+                return
 
-                if abs(weight) >= self.minimum_weight:
-                    weights[name] = weight
-                    usable_names.append(name)
+            # Strong shrinkage and conservative selection.
+            scores = np.array(
+                [score for _, score in candidates],
+                dtype=np.float64,
+            )
 
-            self.feature_names = usable_names
+            abs_scores = np.abs(scores)
 
-            if not weights:
-                self.feature_weights = None
+            cutoff = np.quantile(
+                abs_scores,
+                1.0 - self.keep_fraction,
+            )
+
+            selected = []
+
+            for name, score in candidates:
+                if (
+                    abs(score) >= cutoff
+                    and abs(score) >= self.min_abs_score
+                ):
+                    shrunk = score / (
+                        self.ridge + abs(score)
+                    )
+                    selected.append(
+                        (name, shrunk)
+                    )
+
+            if not selected:
                 return
 
             total = sum(
-                abs(value)
-                for value in weights.values()
+                abs(weight)
+                for _, weight in selected
             )
 
-            if total > 1e-12:
-                weights = {
-                    key: value / total
-                    for key, value in weights.items()
-                }
+            if total <= 1e-12:
+                return
 
-            self.feature_weights = weights
+            self.feature_names = [
+                name for name, _ in selected
+            ]
+
+            self.feature_weights = {
+                name: weight / total
+                for name, weight in selected
+            }
 
         except Exception:
             self.feature_names = None
@@ -211,12 +227,15 @@ class MyPredictor(Predictor):
                 features.columns.get_level_values(0)
             )
 
+            n_time = len(features)
+            n_assets = len(tickers)
+
             raw = np.zeros(
-                (len(features), len(tickers)),
+                (n_time, n_assets),
                 dtype=np.float64,
             )
 
-            total_abs_weight = 0.0
+            total = 0.0
 
             for name in self.feature_names:
                 if name not in available:
@@ -230,14 +249,21 @@ class MyPredictor(Predictor):
                 if abs(weight) < 1e-12:
                     continue
 
-                block = self._rank_matrix(
+                ranked = self._rank(
                     features[name]
                 )
 
-                raw += weight * block
-                total_abs_weight += abs(weight)
+                # Preserve the full cross-sectional ranking,
+                # rather than collapsing assets to one row statistic.
+                ranked -= ranked.mean(
+                    axis=1,
+                    keepdims=True,
+                )
 
-            if total_abs_weight < 1e-12:
+                raw += weight * ranked
+                total += abs(weight)
+
+            if total <= 1e-12:
                 return zero_signal
 
             raw -= raw.mean(
@@ -245,9 +271,8 @@ class MyPredictor(Predictor):
                 keepdims=True,
             )
 
-            # Robust row scaling without forcing every row
-            # to have identical spherical magnitude.
-            row_scale = np.nanpercentile(
+            # Mild robust compression; no forced sphere normalization.
+            scale = np.nanpercentile(
                 np.abs(raw),
                 75,
                 axis=1,
@@ -255,19 +280,15 @@ class MyPredictor(Predictor):
             )
 
             raw = raw / np.maximum(
-                row_scale,
+                scale,
                 1e-8,
             )
 
-            raw = np.tanh(raw)
-            raw -= raw.mean(
-                axis=1,
-                keepdims=True,
+            desired = (
+                np.tanh(raw)
+                * self.output_scale
             )
 
-            desired = raw * self.output_scale
-
-            n_time, n_assets = desired.shape
             output = np.zeros_like(desired)
 
             if (
@@ -288,8 +309,7 @@ class MyPredictor(Predictor):
 
                 movement = np.sum(
                     np.abs(
-                        target_position
-                        - active
+                        target_position - active
                     )
                 )
 
@@ -304,6 +324,7 @@ class MyPredictor(Predictor):
                     )
 
                 current -= current.mean()
+
                 output[t] = current
                 active = current.copy()
 
