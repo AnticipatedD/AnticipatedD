@@ -10,7 +10,7 @@ from predictor import Predictor
 
 class MyPredictor(Predictor):
     """
-    Production-Grade Quant Strategy for AlphaNova Biweekly Season 1 Cycle 5 Tournament.
+    Production-Grade Quant Strategy for AlphaNova Biweekly Season 1 Final Cycle Tournament.
     Implements a Cross-Sectional Non-Linear Phase-Shift Expansion with 
     Exact L1 Turnover Hysteresis and Spherical Variance Stabilization.
     """
