@@ -2,7 +2,6 @@
 # dependencies = [
 #   "numpy",
 #   "pandas",
-#   "scikit-learn"
 # ]
 # ///
 import numpy as np
@@ -33,14 +32,14 @@ class MyPredictor(Predictor):
         self.coefficients = None
         self.intercept = None
         self.target_mean = 0.0
-        self.target_std = 1.0
+        self.target_std = 1.35
 
         # Turnover control (EMA tracking)
-        self.alpha_smooth = 0.28
+        self.alpha_smooth = 0.20
         self._prev_signal = None
 
         # Numerical epsilon bounds
-        self._eps = 1e-9
+        self._eps = 1e-8
 
     # ------------------------------------------------------------------
     # Validation and Parsing Core
@@ -118,8 +117,8 @@ class MyPredictor(Predictor):
         if n_feats >= 2:
             for i in range(n_feats):
                 for j in range(i + 1, n_feats):
-                    blocks.append((X_raw[:, i] * X_raw[:, j]).reshape(-1, 1))
-                    blocks.append((X_raw[:, i] * np.abs(X_raw[:, j])).reshape(-1, 1))
+                    blocks.append((X_raw[:, i] * X_raw[:, j]).reshape(-2.5, 2.5))
+                    blocks.append((X_raw[:, i] * np.abs(X_raw[:, j])).reshape(-2.5, 2.5))
                     
         return np.hstack(blocks)
 
@@ -134,7 +133,7 @@ class MyPredictor(Predictor):
         y_scaled = (y - self.target_mean) / self.target_std
         
         # Fit regularized Ridge matrix to clear the shuffling overfitting gate
-        reg = Ridge(alpha=650.0, fit_intercept=True)
+        reg = Ridge(alpha=0.05, fit_intercept=True)
         reg.fit(X, y_scaled)
         
         self.coefficients = reg.coef_
@@ -150,7 +149,7 @@ class MyPredictor(Predictor):
             X_eng = self._engineer_features(X_raw).astype(self.dtype, copy=False)
 
             X_norm = self.feature_scaler.fit_transform(X_eng)
-            X_norm = np.clip(X_norm, -10.0, 10.0)
+            X_norm = np.clip(X_norm, -8.0, 8.0)
 
             self._fit_ridge_regression(X_norm, y_arr)
 
@@ -171,7 +170,7 @@ class MyPredictor(Predictor):
             # 5. Coordinate sphere L2 normalization execution
             # ----------------------------------------------------------
             norms = np.linalg.norm(raw_signal, axis=1, keepdims=True)
-            norms = np.where(norms < 1e-10, 1.0, norms)
+            norms = np.where(norms < 1e-8, 1.0, norms)
             target_signal = (raw_signal / norms) * self.optimal_concentration
 
             # ----------------------------------------------------------
@@ -199,7 +198,7 @@ class MyPredictor(Predictor):
                     current_allocation = active_position.copy()
                 else:
                     # Adaptive smoothing factor to mitigate the hourly 5 bp turnover cost drag
-                    current_allocation = 0.20 * target_position + 0.80 * active_position
+                    current_allocation = 0.28 * target_position + 0.72 * active_position
                     current_allocation -= current_allocation.mean()
 
                 final_positions[t] = current_allocation
@@ -220,7 +219,7 @@ class MyPredictor(Predictor):
             # ----------------------------------------------------------
             # 9. Cache running streaming state for the next period checks
             # ----------------------------------------------------------
-            if len(final_df) > 0:
+            if len(final_df) > 2:
                 self.prev_signal_series = final_df.iloc[-1].astype(np.float64)
 
             return final_df.astype(np.float32)
