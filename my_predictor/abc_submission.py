@@ -13,36 +13,51 @@ from predictor import Predictor
 
 class MyPredictor(Predictor):
     """
-    REGULARIZED01
+    ENGINEERED02
 
-    Conservative target-aligned rank ensemble intended to reduce
-    false discoveries and improve robustness in AlphaNova's
-    overfitting test.
+    Fixed, target-independent cross-sectional ensemble.
+
+    Design goals:
+    - no target-based feature selection
+    - no pairwise feature explosion
+    - no train/validation contamination
+    - no spherical normalization
+    - no stateful hysteresis
+    - robust row-wise demeaning
     """
 
     def __init__(self):
         super().__init__()
 
         self.feature_names = None
-        self.feature_weights = None
 
-        self.prev_signal = None
-        self.prev_tickers = None
-
-        self.output_scale = 0.18
+        self.output_scale = 0.20
         self.target_bound = 1.35
 
-        self.ridge = 1.50
-        self.keep_fraction = 0.25
-        self.min_abs_score = 0.04
+    def train(
+        self,
+        features: pd.DataFrame,
+        target: pd.DataFrame = None,
+    ) -> None:
+        self.feature_names = None
 
-        self.turnover_threshold = 0.55
-        self.update_fraction = 0.25
+        if features is None or features.empty:
+            return
 
-    def _rank(self, values):
+        try:
+            self.feature_names = list(
+                features.columns
+                .get_level_values(0)
+                .unique()
+            )
+        except Exception:
+            self.feature_names = None
+
+    def _rank(self, block):
+        values = block.astype(np.float64)
+
         ranked = (
-            values.astype(np.float64)
-            .rank(
+            values.rank(
                 axis=1,
                 pct=True,
                 method="average",
@@ -51,148 +66,6 @@ class MyPredictor(Predictor):
         ) * 2.0
 
         return ranked.fillna(0.0).to_numpy()
-
-    def _target_vector(self, target, index):
-        if target is None:
-            return None
-
-        if isinstance(target, pd.DataFrame):
-            if target.shape[1] == 1:
-                y = target.iloc[:, 0]
-            else:
-                y = target.mean(axis=1)
-        elif isinstance(target, pd.Series):
-            y = target
-        else:
-            y = pd.Series(
-                np.asarray(target).reshape(-1),
-                index=index,
-            )
-
-        y = y.reindex(index)
-        y = y.astype(np.float64).to_numpy()
-
-        y = np.nan_to_num(
-            y,
-            nan=0.0,
-            posinf=0.0,
-            neginf=0.0,
-        )
-
-        y -= y.mean()
-
-        scale = np.std(y)
-
-        if scale < 1e-10:
-            return None
-
-        return y / scale
-
-    def train(
-        self,
-        features: pd.DataFrame,
-        target: pd.DataFrame = None,
-    ) -> None:
-        self.feature_names = None
-        self.feature_weights = None
-
-        if features is None or features.empty:
-            return
-
-        try:
-            y = self._target_vector(
-                target,
-                features.index,
-            )
-
-            if y is None:
-                return
-
-            available = set(
-                features.columns.get_level_values(0)
-            )
-
-            candidates = []
-
-            for name in features.columns.get_level_values(0).unique():
-                if name not in available:
-                    continue
-
-                x = self._rank(features[name])
-
-                # One robust cross-sectional summary per row.
-                x = x.mean(axis=1)
-                x -= x.mean()
-
-                scale = np.std(x)
-
-                if scale < 1e-10:
-                    continue
-
-                x /= scale
-
-                score = np.mean(x * y)
-
-                if not np.isfinite(score):
-                    continue
-
-                candidates.append(
-                    (name, float(score))
-                )
-
-            if not candidates:
-                return
-
-            # Strong shrinkage and conservative selection.
-            scores = np.array(
-                [score for _, score in candidates],
-                dtype=np.float64,
-            )
-
-            abs_scores = np.abs(scores)
-
-            cutoff = np.quantile(
-                abs_scores,
-                1.0 - self.keep_fraction,
-            )
-
-            selected = []
-
-            for name, score in candidates:
-                if (
-                    abs(score) >= cutoff
-                    and abs(score) >= self.min_abs_score
-                ):
-                    shrunk = score / (
-                        self.ridge + abs(score)
-                    )
-                    selected.append(
-                        (name, shrunk)
-                    )
-
-            if not selected:
-                return
-
-            total = sum(
-                abs(weight)
-                for _, weight in selected
-            )
-
-            if total <= 1e-12:
-                return
-
-            self.feature_names = [
-                name for name, _ in selected
-            ]
-
-            self.feature_weights = {
-                name: weight / total
-                for name, weight in selected
-            }
-
-        except Exception:
-            self.feature_names = None
-            self.feature_weights = None
 
     def predict(
         self,
@@ -218,7 +91,6 @@ class MyPredictor(Predictor):
             features is None
             or features.empty
             or not self.feature_names
-            or not self.feature_weights
         ):
             return zero_signal
 
@@ -227,109 +99,76 @@ class MyPredictor(Predictor):
                 features.columns.get_level_values(0)
             )
 
-            n_time = len(features)
-            n_assets = len(tickers)
-
-            raw = np.zeros(
-                (n_time, n_assets),
-                dtype=np.float64,
-            )
-
-            total = 0.0
+            blocks = []
 
             for name in self.feature_names:
                 if name not in available:
-                    continue
-
-                weight = self.feature_weights.get(
-                    name,
-                    0.0,
-                )
-
-                if abs(weight) < 1e-12:
                     continue
 
                 ranked = self._rank(
                     features[name]
                 )
 
-                # Preserve the full cross-sectional ranking,
-                # rather than collapsing assets to one row statistic.
                 ranked -= ranked.mean(
                     axis=1,
                     keepdims=True,
                 )
 
-                raw += weight * ranked
-                total += abs(weight)
+                blocks.append(ranked)
 
-            if total <= 1e-12:
+            if len(blocks) == 0:
                 return zero_signal
 
-            raw -= raw.mean(
+            cube = np.stack(
+                blocks,
+                axis=0,
+            )
+
+            # Equal-weight robust consensus.
+            # No data-dependent feature selection.
+            signal = cube.mean(axis=0)
+
+            # Add a bounded nonlinear consensus term.
+            # The fixed coefficient avoids fitting noise.
+            nonlinear = np.tanh(
+                1.25 * signal
+            )
+
+            signal = (
+                0.75 * signal
+                + 0.25 * nonlinear
+            )
+
+            signal -= signal.mean(
                 axis=1,
                 keepdims=True,
             )
 
-            # Mild robust compression; no forced sphere normalization.
+            # Robust row scaling without forcing identical
+            # spherical exposure on every row.
             scale = np.nanpercentile(
-                np.abs(raw),
+                np.abs(signal),
                 75,
                 axis=1,
                 keepdims=True,
             )
 
-            raw = raw / np.maximum(
+            signal = signal / np.maximum(
                 scale,
                 1e-8,
             )
 
-            desired = (
-                np.tanh(raw)
-                * self.output_scale
+            signal = np.tanh(
+                signal
+            ) * self.output_scale
+
+            signal -= signal.mean(
+                axis=1,
+                keepdims=True,
             )
 
-            output = np.zeros_like(desired)
-
-            if (
-                self.prev_signal is not None
-                and self.prev_tickers is not None
-                and self.prev_signal.shape == (n_assets,)
-                and self.prev_tickers.equals(tickers)
-            ):
-                active = self.prev_signal.copy()
-            else:
-                active = np.zeros(
-                    n_assets,
-                    dtype=np.float64,
-                )
-
-            for t in range(n_time):
-                target_position = desired[t]
-
-                movement = np.sum(
-                    np.abs(
-                        target_position - active
-                    )
-                )
-
-                if movement <= self.turnover_threshold:
-                    current = active.copy()
-                else:
-                    current = (
-                        (1.0 - self.update_fraction)
-                        * active
-                        + self.update_fraction
-                        * target_position
-                    )
-
-                current -= current.mean()
-
-                output[t] = current
-                active = current.copy()
-
             result = pd.DataFrame(
-                output,
+                signal,
                 index=features.index,
                 columns=tickers,
             )
@@ -343,13 +182,6 @@ class MyPredictor(Predictor):
                 result.mean(axis=1),
                 axis=0,
             )
-
-            self.prev_signal = (
-                result.iloc[-1]
-                .to_numpy(dtype=np.float64)
-            )
-
-            self.prev_tickers = result.columns.copy()
 
             return result.astype(np.float32)
 
