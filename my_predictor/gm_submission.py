@@ -12,7 +12,7 @@ class MyPredictor(Predictor):
     """
     Advanced Cross-Sectional Alpha Engine for AlphaNova.
     Equipped with a targeted temporal rolling risk scalar, adaptive horizon windows,
-    and an asymmetric turnover friction framework to penalize side-flipping.
+    and a continuous proportional asymmetric turnover framework to prevent lockups.
     """
     def __init__(self):
         super().__init__()
@@ -23,9 +23,8 @@ class MyPredictor(Predictor):
         # Risk & Compliance constraints
         self.allocation_cap = 0.20
         self.scale_factor = 0.28
-        self.base_hysteresis = 1.12
         
-        # Adaptive Risk scaling properties
+        # Risk scaling properties
         self.vol_floor = 0.01
         self.evaluation_counter = 0
 
@@ -54,7 +53,6 @@ class MyPredictor(Predictor):
             self.evaluation_counter += n_timestamps
             
             # --- ADAPTIVE HORIZON WINDOW DETERMINATION ---
-            # Adjust window dynamically based on sample maturity (expands as sequence progresses)
             adaptive_window = int(np.clip(10 + (self.evaluation_counter // 20), 5, 40))
             
             # 1. Transform Raw Cross-Sections to Uniform Quantile Vectors [-1, 1]
@@ -83,28 +81,25 @@ class MyPredictor(Predictor):
             
             ideal_allocations = (centered_velocity / row_norms) * self.scale_factor
             
-            # --- TARGETED TARGET FACTOR VARIANCE REGIME SCALING ---
-            # Focus structural volatility mapping exclusively on Quality & Volatility metrics
+            # --- TARGETED FACTOR VARIANCE REGIME SCALING ---
             targeted_features = [f for f in self.feature_names if 'qual' in f.lower() or 'vol' in f.lower()]
             if not targeted_features:
-                targeted_features = self.feature_names[:2]  # Fallback to initial elements safely
+                targeted_features = self.feature_names[:2]
                 
             raw_matrix = features[targeted_features].fillna(0.0).to_numpy()
             time_series_variance = np.var(raw_matrix, axis=1)
             
-            # Compute a rolling average of core variance over time via the adaptive horizon window
             rolling_variance = pd.Series(time_series_variance).rolling(
                 window=adaptive_window, min_periods=1
             ).mean().to_numpy()
             
-            # Scale down base allocations when historical regime variance expands
             median_vol = np.median(rolling_variance) if len(rolling_variance) > 0 else 1.0
             median_vol = max(median_vol, self.vol_floor)
             risk_scalars = np.clip(median_vol / (rolling_variance + 1e-8), 0.30, 1.0)
             
             ideal_allocations = ideal_allocations * risk_scalars[:, np.newaxis]
             
-            # 4. State Integration and Asymmetric Turnover Hysteresis Filter
+            # 4. Continuous Asymmetric Update Loop
             stabilized_positions = np.zeros_like(ideal_allocations)
             
             if (
@@ -120,24 +115,16 @@ class MyPredictor(Predictor):
             for t_idx in range(n_timestamps):
                 target_weights = ideal_allocations[t_idx]
                 
-                # Dynamic dispersion adjustment
-                dispersion = np.std(target_weights)
-                dynamic_threshold = self.base_hysteresis * (1.0 + dispersion)
-                
-                # --- ASYMMETRIC TURNOVER PENALIZATION ---
+                # Identify long-to-short or short-to-long side flips
                 sign_flip_mask = (np.sign(target_weights) != np.sign(running_weights)) & (running_weights != 0.0)
                 
-                raw_deltas = np.abs(target_weights - running_weights)
-                # Apply 2x penalty cost specifically targeting side-flips
-                asymmetric_deltas = np.where(sign_flip_mask, raw_deltas * 2.0, raw_deltas)
-                asymmetric_l1_distance = np.sum(asymmetric_deltas)
+                # CONTINUOUS PENALIZATION: Apply a slower tracking speed (higher friction)
+                # exclusively to assets flipping signs, while updating standard allocations normally.
+                update_speed = np.where(sign_flip_mask, 0.08, 0.35)
                 
-                if asymmetric_l1_distance < dynamic_threshold:
-                    current_weights = running_weights.copy()
-                else:
-                    current_weights = 0.25 * target_weights + 0.75 * running_weights
-                    current_weights -= current_weights.mean()
-                    
+                current_weights = (update_speed * target_weights) + ((1.0 - update_speed) * running_weights)
+                current_weights -= current_weights.mean()
+                
                 stabilized_positions[t_idx] = current_weights
                 running_weights = current_weights.copy()
                 
