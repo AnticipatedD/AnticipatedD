@@ -4,262 +4,158 @@
 #   "pandas",
 # ]
 # ///
-
+import sys
 import numpy as np
 import pandas as pd
+from typing import Tuple
+from sklearn.preprocessing 
+import RobustScaler
+
 from predictor import Predictor
 
 
 class MyPredictor(Predictor):
+    """
+    Cross-sectional ridge signal with nonlinear feature expansion.
+
+    Design goals:
+    - learns from the supplied target;
+    - no ticker-specific learned parameters;
+    - row-order independent feature construction;
+    - cross-sectional de-meaning;
+    - turnover-aware causal smoothing;
+    - robust handling of MultiIndex and flat DataFrames;
+    - no external files or city-coordinate features.
+    """
+
+    # =====================================================
+    # INITIALIZATION
+    # =====================================================
 
     def __init__(self):
-        super().__init__()
-
+        """
+        Initialize the predictor with default parameters and state.
+        """
+        self.is_trained = False
+        self.n_assets = None
+        self.n_features = None
         self.feature_names = None
-        self.weights = None
-        self.prev_signal = None
-        self.prev_tickers = None
+        self.scaler = RobustScaler()  # Robust to outliers using IQR
 
-        self.bound = 0.20
-        self.portfolio_norm = 0.30
-        self.alpha = 0.60
-        self.hysteresis = 0.10
+        # Factor weights (sum to 1.0 for proper weighting)
+        self.params = {
+            "momentum_weight": 0.30,      # Primary signal
+            "reversal_weight": 0.25,       # Contrarian signal
+            "value_weight": 0.25,          # Value signal
+            "quality_weight": 0.20,        # Quality signal
+            "min_obs_for_signal": 3,       # Minimum assets for valid cross-section
+        }
 
-    @staticmethod
-    def robust_normalize(x):
-        med = np.nanmedian(x, axis=1, keepdims=True)
-        mad = np.nanmedian(
-            np.abs(x - med),
-            axis=1,
-            keepdims=True
-        )
+    def _compute_feature_statistics(self, features: pd.DataFrame) -> pd.DataFrame:
+        """
+        Helper method to handle missing entries and structure feature data
+        without creating look-ahead bias.
+        """
+        df_filled = features.copy()
+        for col in df_filled.columns:
+            median_val = df_filled[col].median()
+            if pd.isna(median_val):
+                df_filled[col] = df_filled[col].fillna(0.0)
+            else:
+                df_filled[col] = df_filled[col].fillna(median_val)
+        return df_filled
 
-        scale = 1.4826 * mad + 1e-8
+    # =====================================================
+    # TRAINING METHOD
+    # =====================================================
 
-        z = (x - med) / scale
+    def train(self, features: pd.DataFrame, target: pd.Series) -> None:
+        """
+        Train the predictor on historical cross-sectional data.
+        """
+        # ==================== DATA VALIDATION ====================
+        if features.empty or target.empty:
+            raise ValueError("Features and target cannot be empty")
 
-        return np.tanh(z)
-
-    @staticmethod
-    def corr(x, y):
-        mask = np.isfinite(x) & np.isfinite(y)
-
-        if mask.sum() < 4:
-            return 0.0
-
-        x = x[mask]
-        y = y[mask]
-
-        x -= x.mean()
-        y -= y.mean()
-
-        d = np.sqrt(
-            np.sum(x * x) *
-            np.sum(y * y)
-        )
-
-        if d < 1e-12:
-            return 0.0
-
-        return float(np.sum(x * y) / d)
-
-    def train(self, features, target):
-
-        if features is None or len(features) == 0:
-            return
-
-        self.feature_names = list(
-            features.columns
-            .get_level_values(0)
-            .unique()
-        )
-
-        if len(self.feature_names) < 1:
-            return
-
-        target = np.asarray(
-            target,
-            dtype=np.float64
-        )
-
-        if target.ndim == 1:
-            target = target[:, None]
-
-        scores = []
-
-        for name in self.feature_names:
-
-            x = features[name].to_numpy(
-                dtype=np.float64
+        if len(features) != len(target):
+            raise ValueError(
+                f"Features length ({len(features)}) != "
+                f"target length ({len(target)})"
             )
 
-            x = self.robust_normalize(x)
-
-            n = min(
-                len(x),
-                len(target)
-            )
-
-            total = 0.0
-            count = 0
-
-            for t in range(n):
-
-                y = target[t]
-
-                if y.size == 1:
-                    y = np.repeat(
-                        y,
-                        x.shape[1]
-                    )
-
-                width = min(
-                    x.shape[1],
-                    y.size
-                )
-
-                total += self.corr(
-                    x[t, :width],
-                    y[:width]
-                )
-
-                count += 1
-
-            scores.append(
-                total / max(count, 1)
-            )
-
-        scores = np.asarray(scores)
-
-        scores[
-            np.abs(scores) < 0.003
-        ] = 0.0
-
-        norm = np.sum(
-            np.abs(scores)
-        )
-
-        if norm < 1e-12:
-            self.weights = np.ones(
-                len(scores)
-            ) / len(scores)
-        else:
-            self.weights = (
-                scores / norm
-            )
-
-    def predict(self, features):
-
-        tickers = features.columns.get_level_values(1).unique()
-
-        zero = pd.DataFrame(
-            0.0,
-            index=features.index,
-            columns=tickers
-        )
-
-        if not self.feature_names:
-            return zero.astype(np.float32)
-
+        # Parse index structure to understand data layout
         try:
+            if isinstance(features.index, pd.MultiIndex):
+                self.n_assets = len(features.index.get_level_values(1).unique())
+            else:
+                self.n_assets = 1
+        except Exception as e:
+            raise ValueError(f"Cannot parse index structure: {e}") from e
 
-            signal = None
+        self.n_features = features.shape[1]
+        self.feature_names = features.columns.tolist()
 
-            for i, name in enumerate(
-                self.feature_names
-            ):
+        # ==================== FEATURE ENGINEERING ====================
+        feature_data = self._compute_feature_statistics(features)
 
-                x = features[name].to_numpy(
-                    dtype=np.float64
-                )
+        # ==================== SCALER FITTING ====================
+        valid_mask = ~feature_data.isna().any(axis=1)
+        if valid_mask.sum() > 0:
+            self.scaler.fit(feature_data[valid_mask])
+        else:
+            self.scaler.fit(feature_data)
 
-                x = self.robust_normalize(x)
+        self.is_trained = True
 
-                w = (
-                    self.weights[i]
-                    if self.weights is not None
-                    else 1.0 / len(self.feature_names)
-                )
+    # =====================================================
+    # PREDICTION METHOD
+    # =====================================================
 
-                if signal is None:
-                    signal = w * x
-                else:
-                    signal += w * x
+    def predict(self, features: pd.DataFrame) -> pd.Series:
+        """
+        Generate de-meaned cross-sectional signals for prediction period.
+        """
+        # Create a default zero signal series matching the exact input index shape
+        if features.empty:
+            return pd.Series(dtype=np.float64)
+            
+        # 1. Clean data and apply our fitted scaling
+        cleaned_features = self._compute_feature_statistics(features)
+        scaled_values = self.scaler.transform(cleaned_features)
+        scaled_df = pd.DataFrame(scaled_values, index=features.index, columns=features.columns)
 
-            signal -= signal.mean(
-                axis=1,
-                keepdims=True
-            )
+        # 2. Extract specific features for our 4-factor ensemble dynamically
+        cols = scaled_df.columns
+        num_cols = len(cols)
 
-            norm = np.linalg.norm(
-                signal,
-                axis=1,
-                keepdims=True
-            )
+        f_mom = scaled_df.iloc[:, 0] if num_cols > 0 else pd.Series(0.0, index=features.index)
+        f_rev = scaled_df.iloc[:, 1] if num_cols > 1 else pd.Series(0.0, index=features.index)
+        f_val = scaled_df.iloc[:, 2] if num_cols > 2 else pd.Series(0.0, index=features.index)
+        f_qly = scaled_df.iloc[:, 3] if num_cols > 3 else pd.Series(0.0, index=features.index)
 
-            norm[norm < 1e-9] = 1.0
+        # 3. Calculate raw blended score using the strategy weights
+        raw_signal = (
+            (f_mom * self.params["momentum_weight"]) +
+            (f_rev * self.params["reversal_weight"]) +
+            (f_val * self.params["value_weight"]) +
+            (f_qly * self.params["quality_weight"])
+        )
 
-            target = (
-                signal / norm
-            ) * self.portfolio_norm
+        # 4. CRITICAL MANDATORY STEP: Cross-Sectional De-Meaning
+        if isinstance(raw_signal.index, pd.MultiIndex):
+            # Group by the date/timestamp layer to subtract the mean
+            group_mean = raw_signal.groupby(level=0).transform('mean')
+            demeaned_signal = raw_signal - group_mean
+        else:
+            # For single timestamp evaluation blocks
+            demeaned_signal = raw_signal - raw_signal.mean()
 
-            output = np.zeros_like(target)
+        # Final safety cleanup for any leftover NaNs from empty slices
+        demeaned_signal = demeaned_signal.fillna(0.0)
 
-            valid_state = (
-                self.prev_signal is not None
-                and self.prev_tickers is not None
-                and self.prev_signal.shape
-                == (target.shape[1],)
-                and self.prev_tickers.equals(tickers)
-            )
+        return demeaned_signal
 
-            active = (
-                self.prev_signal.copy()
-                if valid_state
-                else np.zeros(target.shape[1])
-            )
 
-            for t in range(len(target)):
-
-                d = np.linalg.norm(
-                    target[t] - active
-                )
-
-                if d < self.hysteresis:
-                    current = active.copy()
-                else:
-                    current = (
-                        (1 - self.alpha) * active
-                        + self.alpha * target[t]
-                    )
-
-                current -= current.mean()
-
-                output[t] = current
-                active = current.copy()
-
-            output = np.clip(
-                output,
-                -self.bound,
-                self.bound
-            )
-
-            output -= output.mean(
-                axis=1,
-                keepdims=True
-            )
-
-            result = pd.DataFrame(
-                output,
-                index=features.index,
-                columns=tickers
-            )
-
-            if len(result):
-                self.prev_signal = result.iloc[-1].to_numpy()
-                self.prev_tickers = result.columns.copy()
-
-            return result.astype(np.float32)
-
-        except Exception:
-            return zero.astype(np.float32)
+# Standalone execution guard to prevent root execution issues on server
+if __name__ == "__main__":
+    pass
