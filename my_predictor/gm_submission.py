@@ -11,8 +11,8 @@ from predictor import Predictor
 class MyPredictor(Predictor):
     """
     Advanced Cross-Sectional Alpha Engine for AlphaNova.
-    Natively architecture-aligned with wide MultiIndex input structures.
-    Uses an isolated Gram-Schmidt orthogonalization layer and dynamic dispersion hysteresis.
+    Equipped with a targeted temporal rolling risk scalar, adaptive horizon windows,
+    and an asymmetric turnover friction framework to penalize side-flipping.
     """
     def __init__(self):
         super().__init__()
@@ -24,6 +24,10 @@ class MyPredictor(Predictor):
         self.allocation_cap = 0.20
         self.scale_factor = 0.28
         self.base_hysteresis = 1.12
+        
+        # Adaptive Risk scaling properties
+        self.vol_floor = 0.01
+        self.evaluation_counter = 0
 
     def train(self, features: pd.DataFrame, target: pd.DataFrame = None) -> None:
         """Extract baseline feature definitions if present."""
@@ -35,7 +39,6 @@ class MyPredictor(Predictor):
 
     def predict(self, features: pd.DataFrame) -> pd.DataFrame:
         """Generates cross-sectional signals natively designed for wide-frame data representation."""
-        # MultiIndex safety extraction for assets
         if isinstance(features.columns, pd.MultiIndex):
             assets = features.columns.get_level_values(1).unique()
         else:
@@ -48,41 +51,60 @@ class MyPredictor(Predictor):
             
         try:
             n_timestamps, n_assets = len(features.index), len(assets)
+            self.evaluation_counter += n_timestamps
+            
+            # --- ADAPTIVE HORIZON WINDOW DETERMINATION ---
+            # Adjust window dynamically based on sample maturity (expands as sequence progresses)
+            adaptive_window = int(np.clip(10 + (self.evaluation_counter // 20), 5, 40))
             
             # 1. Transform Raw Cross-Sections to Uniform Quantile Vectors [-1, 1]
             transformed_factors = []
             for factor_name in self.feature_names:
                 raw_slice = features[factor_name].astype(np.float64)
-                # Compute percentile rankings horizontally across asset cross-sections
                 ranked_slice = raw_slice.rank(axis=1, pct=True, method='average')
                 normalized_slice = (ranked_slice - 0.5) * 2.0
                 transformed_factors.append(normalized_slice.fillna(0.0).to_numpy())
                 
             # 2. Sequential Orthogonal Component Routing
-            # Prevents redundant factor exposures while generating clean structural velocity
             orthogonal_blocks = []
             for idx, primary_matrix in enumerate(transformed_factors):
-                # Always preserve the primary signal block
                 orthogonal_blocks.append(np.tanh(primary_matrix * 1.5))
-                
-                # Extract residual components from remaining signal mixes
                 if idx < len(transformed_factors) - 1:
                     secondary_matrix = transformed_factors[idx + 1]
-                    # Soft cross-product variance mix
                     residual_mix = np.sign(primary_matrix) * np.log1p(np.abs(primary_matrix * secondary_matrix))
                     orthogonal_blocks.append(residual_mix)
 
-            # Synthesize cross-sectional velocity vectors
             blended_velocity = np.mean(orthogonal_blocks, axis=0)
             
-            # 3. Cross-Sectional Space Centering & Absolute Value Optimization
+            # 3. Cross-Sectional Space Centering & Volatility Scaling
             centered_velocity = blended_velocity - blended_velocity.mean(axis=1, keepdims=True)
             row_norms = np.linalg.norm(centered_velocity, axis=1, keepdims=True)
             row_norms = np.where(row_norms < 1e-9, 1.0, row_norms)
             
             ideal_allocations = (centered_velocity / row_norms) * self.scale_factor
             
-            # 4. State Integration and Dynamic Dispersion Hysteresis
+            # --- TARGETED TARGET FACTOR VARIANCE REGIME SCALING ---
+            # Focus structural volatility mapping exclusively on Quality & Volatility metrics
+            targeted_features = [f for f in self.feature_names if 'qual' in f.lower() or 'vol' in f.lower()]
+            if not targeted_features:
+                targeted_features = self.feature_names[:2]  # Fallback to initial elements safely
+                
+            raw_matrix = features[targeted_features].fillna(0.0).to_numpy()
+            time_series_variance = np.var(raw_matrix, axis=1)
+            
+            # Compute a rolling average of core variance over time via the adaptive horizon window
+            rolling_variance = pd.Series(time_series_variance).rolling(
+                window=adaptive_window, min_periods=1
+            ).mean().to_numpy()
+            
+            # Scale down base allocations when historical regime variance expands
+            median_vol = np.median(rolling_variance) if len(rolling_variance) > 0 else 1.0
+            median_vol = max(median_vol, self.vol_floor)
+            risk_scalars = np.clip(median_vol / (rolling_variance + 1e-8), 0.30, 1.0)
+            
+            ideal_allocations = ideal_allocations * risk_scalars[:, np.newaxis]
+            
+            # 4. State Integration and Asymmetric Turnover Hysteresis Filter
             stabilized_positions = np.zeros_like(ideal_allocations)
             
             if (
@@ -98,16 +120,21 @@ class MyPredictor(Predictor):
             for t_idx in range(n_timestamps):
                 target_weights = ideal_allocations[t_idx]
                 
-                # Compute current cross-sectional dispersion to adjust turnover limits dynamically
+                # Dynamic dispersion adjustment
                 dispersion = np.std(target_weights)
                 dynamic_threshold = self.base_hysteresis * (1.0 + dispersion)
                 
-                l1_distance = np.sum(np.abs(target_weights - running_weights))
+                # --- ASYMMETRIC TURNOVER PENALIZATION ---
+                sign_flip_mask = (np.sign(target_weights) != np.sign(running_weights)) & (running_weights != 0.0)
                 
-                if l1_distance < dynamic_threshold:
+                raw_deltas = np.abs(target_weights - running_weights)
+                # Apply 2x penalty cost specifically targeting side-flips
+                asymmetric_deltas = np.where(sign_flip_mask, raw_deltas * 2.0, raw_deltas)
+                asymmetric_l1_distance = np.sum(asymmetric_deltas)
+                
+                if asymmetric_l1_distance < dynamic_threshold:
                     current_weights = running_weights.copy()
                 else:
-                    # Exponential smoothing step to update allocations smoothly
                     current_weights = 0.25 * target_weights + 0.75 * running_weights
                     current_weights -= current_weights.mean()
                     
@@ -117,12 +144,10 @@ class MyPredictor(Predictor):
             # 5. Rigorous Compliance Cleaning & Absolute Float Balancing
             output_df = pd.DataFrame(stabilized_positions, index=features.index, columns=assets)
             
-            # Multi-pass centering to clean rounding float leaks under truncation bounds
             output_df = output_df.sub(output_df.mean(axis=1), axis=0)
             output_df = output_df.clip(-self.allocation_cap, self.allocation_cap)
             output_df = output_df.sub(output_df.mean(axis=1), axis=0)
             
-            # Keep historical state for walk-forward execution blocks
             self.prev_weights = output_df.iloc[-1].to_numpy(dtype=np.float64)
             self.prev_columns = output_df.columns.copy()
             
