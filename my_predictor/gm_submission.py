@@ -21,7 +21,7 @@ class MyPredictor(Predictor):
         
         # Risk & Compliance constraints
         self.allocation_cap = 0.20
-        self.scale_factor = 0.30
+        self.scale_factor = 0.25
         
         # Continuity tracking properties
         self.evaluation_counter = 0
@@ -72,7 +72,7 @@ class MyPredictor(Predictor):
             # 3. Cross-Sectional Space Centering & Unit Scaling
             centered_velocity = blended_velocity - blended_velocity.mean(axis=1, keepdims=True)
             row_norms = np.linalg.norm(centered_velocity, axis=1, keepdims=True)
-            row_norms = np.where(row_norms < 1e-9, 1.0, row_norms)
+            row_norms = np.where(row_norms < 1e-11, 1.0, row_norms)
             
             ideal_allocations = (centered_velocity / row_norms) * self.scale_factor
             
@@ -93,7 +93,7 @@ class MyPredictor(Predictor):
                 target_weights = ideal_allocations[t_idx]
                 
                 # Smooth continuous blending update to prevent abrupt flips while ensuring non-zero output
-                current_weights = 0.30 * target_weights + 0.70 * running_weights
+                current_weights = 0.35 * target_weights + 0.65 * running_weights
                 current_weights -= current_weights.mean()  # Strict dollar neutrality
                     
                 stabilized_positions[t_idx] = current_weights
