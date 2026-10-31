@@ -32,9 +32,9 @@ class MyPredictor(Predictor):
         self.last_asset_universe = None
         
         # Portfolio Risk Constraints
-        self.max_exposure_limit = 0.35
-        self.target_leverage = 0.25
-        self.smoothing_decay = 0.15  # High responsiveness to eliminate lag and flatness
+        self.max_exposure_limit = 0.20
+        self.target_leverage = 0.35
+        self.smoothing_decay = 0.30  # High responsiveness to eliminate lag and flatness
 
     def train(self, features: pd.DataFrame, target: pd.DataFrame = None) -> None:
         """
@@ -55,7 +55,7 @@ class MyPredictor(Predictor):
         N, K = arr.shape
         
         ranks = pd.DataFrame(arr).rank(axis=1, pct=True).to_numpy()
-        clipped_ranks = np.clip(ranks, 1e-8, 1.0 - 1e-8)
+        clipped_ranks = np.clip(ranks, 1e-6, 1.0 - 1e-6)
         gaussianized = np.sqrt(2.0) * erfinv(2.0 * clipped_ranks - 1.0)
         return gaussianized
 
@@ -75,7 +75,7 @@ class MyPredictor(Predictor):
         for t in range(T_steps):
             signal_row = raw_signals[t]
             projection = np.dot(signal_row, basis_vector) / basis_norm
-            orthogonal_signals[t] = signal_row - 0.25 * projection * basis_vector
+            orthogonal_signals[t] = signal_row - 0.40 * projection * basis_vector
 
         return orthogonal_signals
 
