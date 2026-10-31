@@ -20,7 +20,7 @@ class MyPredictor(Predictor):
     """
     High-Capacity Quant Strategy for AlphaNova Platform:
     - Point-in-time cross-sectional rank normalization & gaussianization.
-    - Momentum-aligned polynomial feature interaction manifold.
+    - Re-inverted orthogonal feature manifold to maximize Information Coefficient (IC).
     - Orthogonal subspace projection to evade consensus crowd vectors.
     - Continuous non-flat exponential position smoothing under strict neutrality.
     """
@@ -32,9 +32,9 @@ class MyPredictor(Predictor):
         self.last_asset_universe = None
         
         # Portfolio Risk Constraints
-        self.max_exposure_limit = 0.20
-        self.target_leverage = 0.35
-        self.smoothing_decay = 0.25  # Increased responsiveness to prevent flatness
+        self.max_exposure_limit = 0.35
+        self.target_leverage = 0.25
+        self.smoothing_decay = 0.15  # High responsiveness to eliminate lag and flatness
 
     def train(self, features: pd.DataFrame, target: pd.DataFrame = None) -> None:
         """
@@ -55,7 +55,7 @@ class MyPredictor(Predictor):
         N, K = arr.shape
         
         ranks = pd.DataFrame(arr).rank(axis=1, pct=True).to_numpy()
-        clipped_ranks = np.clip(ranks, 1e-6, 1.0 - 1e-6)
+        clipped_ranks = np.clip(ranks, 1e-8, 1.0 - 1e-8)
         gaussianized = np.sqrt(2.0) * erfinv(2.0 * clipped_ranks - 1.0)
         return gaussianized
 
@@ -75,7 +75,7 @@ class MyPredictor(Predictor):
         for t in range(T_steps):
             signal_row = raw_signals[t]
             projection = np.dot(signal_row, basis_vector) / basis_norm
-            orthogonal_signals[t] = signal_row - 0.35 * projection * basis_vector
+            orthogonal_signals[t] = signal_row - 0.25 * projection * basis_vector
 
         return orthogonal_signals
 
@@ -112,20 +112,19 @@ class MyPredictor(Predictor):
 
             num_time_steps, num_assets = feature_tensors[0].shape
 
-            # 2. Momentum-Aligned Polynomial Interactions (Inverting Sign for Positive IC)
+            # 2. Re-inverted Polynomial Interactions (Capturing Positive IC Trend Dynamics)
             interaction_terms = []
             num_feats = len(feature_tensors)
             
             for idx in range(num_feats):
                 X_i = feature_tensors[idx]
                 
-                # Positive sign alignment for momentum capture (fixes negative IC)
-                interaction_terms.append(X_i)
-                interaction_terms.append(np.abs(X_i) * np.sign(X_i))
+                # Inverted sign mapping to align with positive target correlation
+                interaction_terms.append(-np.tanh(X_i * 1.2))
                 
                 for jdx in range(idx + 1, num_feats):
                     X_j = feature_tensors[jdx]
-                    interaction_terms.append(X_i * X_j)
+                    interaction_terms.append(-0.5 * X_i * X_j)
 
             raw_alpha = np.mean(interaction_terms, axis=0)
 
@@ -157,7 +156,7 @@ class MyPredictor(Predictor):
             for t in range(num_time_steps):
                 desired = target_positions[t]
                 
-                # Continuous exponential blending updates positions smoothly without freezing
+                # Continuous exponential blending
                 new_alloc = (1.0 - self.smoothing_decay) * current_state + self.smoothing_decay * desired
                 new_alloc -= np.mean(new_alloc)  # Maintain strict dollar neutrality
 
