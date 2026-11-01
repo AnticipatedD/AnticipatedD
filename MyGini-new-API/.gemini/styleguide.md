@@ -17,7 +17,7 @@ This guide is mostly about the python content and the notebook, but don't forget
   selecting a model) should always be the same so it's easier for the reader to go directly to the specific content.
 * **Performance:** While readability is paramount, code should be efficient.
 
-# Cookbook notebook specific instructions
+# MyGini Genbook notebook specific instructions
 
 ## Common mistakes
 
