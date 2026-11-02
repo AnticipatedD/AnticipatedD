@@ -1,0 +1,214 @@
+# Gemini API & AI Studio Documentation
+
+> Official developer documentation for Google AI Studio, the Gemini API, and the Google GenAI SDKs.
+
+## How agents should use this documentation
+- **Canonical SDK:** Always use `google-genai` (`pip install google-genai` or `npm install @google/genai`). Never generate code using deprecated packages like `google-generativeai` or `@google/generative-ai`.
+- **API Choice:** Use the Interactions API (`client.interactions`) as the default across all workflows. `generateContent` should we just say generateConent is still supported for existing integrations, but is considered a legacy API.
+- **Markdown Pages:** Every documentation page is available as clean markdown by appending `.md` to the URL.
+
+## Agent setup & developer tooling
+- [Coding agent setup](https://aistudio.google.com/docs/coding-agents.md): Configure Cursor, Claude Code, Antigravity, and other coding assistants.
+- [Gemini skills repository](https://github.com/google-gemini/gemini-skills): Portable agent skills (`gemini-api-dev`, `gemini-live-api-dev`) for coding assistants.
+- [Gemini API plugin](https://github.com/google-gemini/gemini-skills/tree/main/plugins/gemini-api): Bundled plugin with skills, subagents, and hooks for Claude Code and Jetski.
+- [Gemini Docs MCP server](https://gemini-api-docs-mcp.dev): Model Context Protocol server providing live documentation search (`npx add-mcp "https://gemini-api-docs-mcp.dev"`).
+
+## Get started
+- [Overview](https://aistudio.google.com/docs.md): Build apps and agents with Gemini, Nano Banana, Gemini Omni, and Lyria using the Gemini API documentation and reference.
+- [Get started](https://aistudio.google.com/docs/get-started.md): Get started with the Gemini API for Developers using the Interactions API
+- [API keys](https://aistudio.google.com/docs/api-key.md): Get your Gemini API key and start building in less than 5 minutes using the Interactions API.
+- [Pricing](https://aistudio.google.com/docs/pricing.md): Gemini Developer API Pricing
+- [Coding agent setup](https://aistudio.google.com/docs/coding-agents.md): Use Gemini API skills, MCP tools, plugins, and machine-readable documentation to help your coding agent write accurate Gemini code.
+- [API CLI](https://aistudio.google.com/docs/cli.md): Give coding agents, shell scripts, and CI pipelines a stateless CLI to generate text and media, analyze files, and run Gemini managed agents.
+
+## Models
+- [All models](https://aistudio.google.com/docs/models.md): Learn about all of Google's most advanced AI models
+- [Gemini 4 Argon](https://aistudio.google.com/docs/models/gemini-4-argon.md): Explore Gemini 4 Argon (gemini-4-argon), Google's latest Gemini 4 model for coding, reasoning, and agents, featuring a 1M context window and long decode.
+- [Gemini Nano Banana 2.1](https://aistudio.google.com/docs/models/gemini-nano-banana-2.1.md): Learn about Gemini Nano Banana 2.1 from Google
+- [Gemini 3.1 Flash image (Nano Banana 2)](https://aistudio.google.com/docs/models/gemini-3.1-flash-image.md): Learn about Gemini 3.1 Flash Image from Google
+- [Gemini 3.1 Pro preview](https://aistudio.google.com/docs/models/gemini-3.1-pro-preview.md): Learn about Gemini 3.1 Pro Preview from Google
+- [Gemini 3 Pro preview](https://aistudio.google.com/docs/models/gemini-3-pro-preview.md): Learn about Gemini 3 Pro Preview from Google
+- [Gemini 3 Pro image (Nano Banana Pro)](https://aistudio.google.com/docs/models/gemini-3-pro-image.md): Learn about Gemini 3 Pro Image from Google
+- [Gemini 3.8 Flash](https://aistudio.google.com/docs/models/gemini-3.8-flash.md): Learn about Gemini 3.8 Flash from Google
+- [Gemini 3.8 Flash TTS](https://aistudio.google.com/docs/models/gemini-3.8-flash-tts.md): Learn about the Gemini 3.8 Flash TTS model from Google, including when to use it and how to migrate from earlier TTS models.
+- [Gemini 3.8 Flash-Lite TTS](https://aistudio.google.com/docs/models/gemini-3.8-flash-lite-tts.md): Learn about the Gemini 3.8 Flash-Lite TTS model from Google, including when to use it and how to migrate from earlier TTS models.
+- [Gemini 3.8 Live](https://aistudio.google.com/docs/models/gemini-3.8-live.md): Learn about Gemini 3.8 Live, our flagship low-latency audio-to-audio model for real-time multimodal dialogue.
+- [Gemini 3.8 Live Extended Thinking](https://aistudio.google.com/docs/models/gemini-3.8-live-extended-thinking.md): Learn about Gemini 3.8 Live Extended Thinking, our Live API model engineered for complex reasoning and asynchronous tool orchestration.
+- [Gemini 3.7 Flash](https://aistudio.google.com/docs/models/gemini-3.7-flash.md): Learn about Gemini 3.7 Flash from Google
+- [Gemini 3.6 Flash](https://aistudio.google.com/docs/models/gemini-3.6-flash.md): Learn about Gemini 3.6 Flash from Google
+- [Gemini 3.5 Flash](https://aistudio.google.com/docs/models/gemini-3.5-flash.md): Learn about Gemini 3.5 Flash from Google
+- [Gemini 3.5 Flash-Lite](https://aistudio.google.com/docs/models/gemini-3.5-flash-lite.md): Learn about Gemini 3.5 Flash-Lite from Google
+- [Gemini Omni Flash](https://aistudio.google.com/docs/models/gemini-omni-flash.md): Learn about the Gemini Omni Flash video generation and editing model
+- [Gemini 3.5 Transcribe](https://aistudio.google.com/docs/models/gemini-3.5-transcribe.md): Learn about the Gemini 3.5 Transcribe model from Google
+- [Gemini 3.1 Flash Lite image (Nano Banana 2 Lite)](https://aistudio.google.com/docs/models/gemini-3.1-flash-lite-image.md): Learn about Gemini 3.1 Flash Lite Image from Google
+- [Gemini 3.5 Live translate](https://aistudio.google.com/docs/models/gemini-3.5-live-translate-preview.md): Learn about the Gemini 3.5 Live Translate model from Google
+- [Gemini 3 Flash preview](https://aistudio.google.com/docs/models/gemini-3-flash-preview.md): Learn about Gemini 3 Flash Preview from Google
+- [Gemini 3.1 Flash TTS (text-to-speech) preview](https://aistudio.google.com/docs/models/gemini-3.1-flash-tts-preview.md): Learn about Gemini 3.1 Flash TTS Preview model from Google
+- [Veo 3.1 Lite preview](https://aistudio.google.com/docs/models/veo-3.1-lite-generate-preview.md): Learn about the Veo 3.1 video generation model from Google
+- [Gemini 3.1 Flash live preview](https://aistudio.google.com/docs/models/gemini-3.1-flash-live-preview.md): Learn about the Gemini 3.1 Flash Live Preview model from Google
+- [Gemini 3.1 Flash-Lite](https://aistudio.google.com/docs/models/gemini-3.1-flash-lite.md): Learn about Gemini 3.1 Flash-Lite from Google
+- [Gemini 3.1 Flash-Lite preview](https://aistudio.google.com/docs/models/gemini-3.1-flash-lite-preview.md): Learn about Gemini 3.1 Flash-Lite preview from Google
+- [Gemini 2.5 Flash](https://aistudio.google.com/docs/models/gemini-2.5-flash.md): Learn about Gemini 2.5 Flash from Google
+- [Gemini 2.5 Flash preview](https://aistudio.google.com/docs/models/gemini-2.5-flash-preview-09-2025.md): Learn about Gemini 2.5 Flash Preview from Google
+- [Gemini 2.5 Flash image (Nano Banana)](https://aistudio.google.com/docs/models/gemini-2.5-flash-image.md): Learn about Gemini 2.5 Flash Image from Google
+- [Gemini 2.5 Flash live preview](https://aistudio.google.com/docs/models/gemini-2.5-flash-native-audio-preview-12-2025.md): Learn about Gemini 2.5 Flash Live from Google
+- [Gemini 2.5 Flash text-to-speech](https://aistudio.google.com/docs/models/gemini-2.5-flash-preview-tts.md): Learn about Gemini 2.5 Flash TTS from Google
+- [Gemini 2.5 Flash-Lite](https://aistudio.google.com/docs/models/gemini-2.5-flash-lite.md): Learn about Gemini 2.5 Flash-Lite from Google
+- [Gemini 2.5 Flash-Lite preview](https://aistudio.google.com/docs/models/gemini-2.5-flash-lite-preview-09-2025.md): Learn about Gemini 2.5 Flash-Lite Preview from Google
+- [Gemini 2.5 Pro](https://aistudio.google.com/docs/models/gemini-2.5-pro.md): Learn about Gemini 2.5 Pro from Google
+- [Gemini 2.5 Pro text-to-speech](https://aistudio.google.com/docs/models/gemini-2.5-pro-preview-tts.md): Learn about Gemini 2.5 Pro TTS from Google
+- [Gemini 2.5 computer use model](https://aistudio.google.com/docs/models/gemini-2.5-computer-use-preview-10-2025.md): Learn about the Gemini Computer Use model from Google
+- [Gemini 2.0 Flash](https://aistudio.google.com/docs/models/gemini-2.0-flash.md): Learn about Gemini 2.0 Flash from Google
+- [Gemini 2.0 Flash-Lite](https://aistudio.google.com/docs/models/gemini-2.0-flash-lite.md): Learn about Gemini 2.0 Flash-Lite from Google
+- [Imagen 4](https://aistudio.google.com/docs/models/imagen.md): Learn about Imagen 4 from Google
+- [Veo 3.1](https://aistudio.google.com/docs/models/veo-3.1-generate-preview.md): Learn about the Veo 3.1 video generation model from Google
+- [Veo 2.0](https://aistudio.google.com/docs/models/veo-2.0-generate-001.md): Learn about the Veo 2.0 video generation model from Google
+- [Gemini Embedding model](https://aistudio.google.com/docs/models/gemini-embedding-001.md): Learn about the Gemini Embedding model from Google
+- [Gemini Embedding 2 model](https://aistudio.google.com/docs/models/gemini-embedding-2.md): Learn about the Gemini Embedding 2 model from Google
+- [Gemini Embedding 2 preview model](https://aistudio.google.com/docs/models/gemini-embedding-2-preview.md): Learn about the Gemini Embedding 2 model from Google
+- [Gemini Robotics ER 2](https://aistudio.google.com/docs/models/gemini-robotics-er-2-preview.md): Learn about Gemini Robotics ER 2 from Google
+- [Gemini Robotics ER 2 streaming](https://aistudio.google.com/docs/models/gemini-robotics-er-2-streaming-preview.md): Learn about Gemini Robotics ER 2 Streaming from Google
+- [Gemini Robotics-ER 1.5](https://aistudio.google.com/docs/models/gemini-robotics-er-1.5-preview.md): Learn about Gemini Robotics Preview model from Google
+- [Gemini Robotics-ER 1.6](https://aistudio.google.com/docs/models/gemini-robotics-er-1.6-preview.md): Learn about Gemini Robotics Preview model from Google
+- [Deep Research Pro preview](https://aistudio.google.com/docs/models/deep-research-pro-preview-12-2025.md): Learn about Gemini Deep Research Pro preview model from Google
+- [Deep Research preview](https://aistudio.google.com/docs/models/deep-research-preview-04-2026.md): Learn about Gemini Deep Research preview model from Google
+- [Deep Research Max preview](https://aistudio.google.com/docs/models/deep-research-max-preview-04-2026.md): Learn about Gemini Deep Research Max preview model from Google
+- [Antigravity preview 05-2026](https://aistudio.google.com/docs/models/antigravity-preview-05-2026.md): Learn about Antigravity Agent preview model from Google
+- [Antigravity preview 09-2026](https://aistudio.google.com/docs/models/antigravity-preview-09-2026.md): Learn about Antigravity Agent preview model from Google
+- [Lyria RealTime experimental](https://aistudio.google.com/docs/models/lyria-realtime-exp.md): Learn about the Lyria RealTime experimental music generation model from Google
+- [Lyria 3.5](https://aistudio.google.com/docs/models/lyria-3.5.md): Learn about Lyria 3.5 from Google DeepMind
+- [Lyria 3 Clip preview](https://aistudio.google.com/docs/models/lyria-3-clip-preview.md): Learn about Lyria 3 Clip Preview from Google DeepMind
+- [Lyria 3 Pro preview](https://aistudio.google.com/docs/models/lyria-3-pro-preview.md): Learn about Lyria 3 Pro Preview from Google DeepMind
+- [Latest Gemini models](https://aistudio.google.com/docs/latest-model.md): Learn what's new in Gemini 4 Argon (gemini-4-argon), Google's new Gemini 4 model with a 1M shared context window, long decode, pricing, and API migration guide.
+- [What's new in Gemini 3.8 Flash](https://aistudio.google.com/docs/whats-new-gemini-3.8.md): Learn about what's new in Gemini 3.8 Flash, including model capabilities, API changes, and migration guidance.
+- [What's new in Gemini 3.7 Flash](https://aistudio.google.com/docs/whats-new-gemini-3.7.md): Learn about what's new in Gemini 3.7 Flash, including model capabilities, API changes, and migration guidance.
+- [What's new in Gemini 3.6 Flash and 3.5 Flash-Lite](https://aistudio.google.com/docs/whats-new-gemini-3.6.md): Learn about what's new in Gemini 3.6 Flash and Gemini 3.5 Flash-Lite, including model capabilities, API changes, and migration guidance.
+- [What's new in Gemini 3.5 Flash](https://aistudio.google.com/docs/whats-new-gemini-3.5.md): Learn about the new features and migration guidance for Gemini 3.5 Flash.
+- [Nano Banana](https://aistudio.google.com/docs/image-generation.md): Get started generating images with the Gemini API using Nano Banana and Nano Banana Pro
+- [Veo](https://aistudio.google.com/docs/veo.md): Generate high-fidelity videos with native audio using Google's Veo 3.1 API.
+- [Gemini Omni Flash](https://aistudio.google.com/docs/omni.md): Get started with Gemini Omni Flash for fast, conversational video generation and editing using the Interactions API.
+- [Lyria 3.5 — Lyria 3.5 & Lyria Clip](https://aistudio.google.com/docs/music-generation.md): Generate music with the Gemini API using Lyria 3 Clip and Lyria 3.5.
+- [Lyria 3.5 — Lyria RealTime](https://aistudio.google.com/docs/realtime-music-generation.md): Get started building with Lyria RealTime's real-time, streaming music generation in the Gemini API
+- [Lyria 3.5 — Lyria prompt guide](https://aistudio.google.com/docs/lyria-prompt-guide.md): Guide to prompt engineering for music generation with Lyria 3.5 and Lyria RealTime in the Gemini API.
+- [Imagen](https://aistudio.google.com/docs/imagen.md): Imagen models are shut down; migrate to Nano Banana for image generation.
+- [Text-to-speech — Overview](https://aistudio.google.com/docs/speech-generation.md): Generate high-fidelity speech and multi-speaker audio with the Gemini API using gemini-3.8-flash-tts and gemini-3.8-flash-lite-tts.
+- [Text-to-speech — Voice design](https://aistudio.google.com/docs/voice-design.md): Create persistent custom vocal personas from natural-language descriptions with Gemini 3.8 TTS.
+- [Text-to-speech — Voice replication](https://aistudio.google.com/docs/voice-replication.md): Replicate a speaker's voice with persistent voice IDs or stateless client keys in the Gemini API.
+- [Transcribe](https://aistudio.google.com/docs/transcribe.md): Get started transcribing audio with the Gemini 3.5 Transcribe model in the Gemini API
+- [Live](https://aistudio.google.com/docs/live-api.md): Enable low-latency, real-time voice and video interactions with the Live API.
+- [Live translate](https://aistudio.google.com/docs/live-api/live-translate.md): Perform low-latency, real-time speech-to-speech translation with Live API.
+- [Embeddings](https://aistudio.google.com/docs/embeddings.md): Generate vector embeddings for semantic search and classification using Gemini.
+- [Robotics — Overview](https://aistudio.google.com/docs/robotics-overview.md): Overview of Gemini Robotics ER models and capabilities for building robotics applications.
+- [Robotics — Spatial reasoning](https://aistudio.google.com/docs/robotics-spatial.md): Use Gemini Robotics ER for spatial reasoning tasks including object detection, tracking, and trajectory planning.
+- [Robotics — Agentic vision](https://aistudio.google.com/docs/robotics-agentic.md): Use Gemini Robotics ER agentic capabilities including code execution, instrument reading, and image annotation.
+- [Robotics — Task orchestration](https://aistudio.google.com/docs/robotics-orchestration.md): Orchestrate long-horizon robotics tasks by combining spatial reasoning with custom robot APIs.
+- [Robotics — With streaming](https://aistudio.google.com/docs/robotics-streaming.md): Use the Gemini Live API with Gemini Robotics ER 2 Streaming preview for real-time, bidirectional robot orchestration.
+- [Robotics — Video understanding](https://aistudio.google.com/docs/robotics-video-progress.md): Use Gemini Robotics ER 2 to track task progress and identify key moments in robot task videos.
+
+## Core capabilities
+- [Text](https://aistudio.google.com/docs/text-generation.md): Get started building text generation and multi-turn interaction apps with the Gemini API
+- [Image — Image understanding](https://aistudio.google.com/docs/image-understanding.md): Get started building with Gemini's multimodal capabilities in the Gemini API
+- [Video — Video overview](https://aistudio.google.com/docs/video.md): Generate and edit videos in the Gemini API using Gemini Omni Flash.
+- [Video — Video understanding](https://aistudio.google.com/docs/video-understanding.md): Get started building with Gemini's multimodal capabilities in the Gemini API
+- [Documents](https://aistudio.google.com/docs/document-processing.md): Learn how to use the Gemini API to process documents like PDFs
+- [Speech and audio — Audio understanding](https://aistudio.google.com/docs/audio.md): Learn how to analyze audio input and generate text responses using the Gemini API.
+- [Thinking — Thinking](https://aistudio.google.com/docs/thinking.md): Use thinking capabilities with the Gemini API
+- [Thinking — Thought signatures](https://aistudio.google.com/docs/thought-signatures.md): Learn how the Interactions API handles thought signatures and model reasoning.
+- [Structured outputs](https://aistudio.google.com/docs/structured-output.md): Learn how to generate structured JSON output with the Gemini API.
+- [Function calling](https://aistudio.google.com/docs/function-calling.md): Get started using Function Calling with the Gemini API
+- [Long context](https://aistudio.google.com/docs/long-context.md): Learn about how to get started building with long context (1 million context window) on Gemini.
+- [Long decode](https://aistudio.google.com/docs/long-decode.md): Use long decode with Gemini 4 Argon on the Interactions API to generate past 64K tokens up to the 1M-token context window with background execution.
+
+## Agents
+- [Overview](https://aistudio.google.com/docs/agents.md): Build agents that reason, write code, manage files, and browse the web with the Gemini API.
+- [Quickstart](https://aistudio.google.com/docs/managed-agents-quickstart.md): Quickstart guide for making your first call to the manage agents API.
+- [Antigravity agent](https://aistudio.google.com/docs/antigravity-agent.md): Use the Antigravity managed agent to perform multi-step tasks that require reasoning, file operations, and tool use.
+- [Building managed agents](https://aistudio.google.com/docs/custom-agents.md): How to create and use custom agents with managed agents in the Gemini API.
+- [Environments](https://aistudio.google.com/docs/agent-environment.md): Learn how to provision, configure, and manage remote sandbox environments in Gemini Managed Agents.
+- [Credentials](https://aistudio.google.com/docs/agent-credentials.md): Learn how to store and manage server-side credentials for managed agents, including bearer tokens, OAuth2 configurations, and environment variable secrets.
+- [Hooks](https://aistudio.google.com/docs/agent-hooks.md): Configure synchronous hooks inside remote sandboxes to intercept tool calls for security, formatting, and auditing.
+- [Deep Research agent](https://aistudio.google.com/docs/deep-research.md): Deep Research is an agent designed to perform complex, long-running context gathering and synthesis tasks.
+
+## Tools
+- [Overview](https://aistudio.google.com/docs/tools.md): Use tools with the Gemini API to extend the capabilities of Gemini models, enabling them to access real-time information and perform complex computational tasks.
+- [Google Search](https://aistudio.google.com/docs/google-search.md): Ground your model's responses in real-time information from Google Search to improve factual accuracy and provide citations.
+- [Google Maps](https://aistudio.google.com/docs/maps-grounding.md): Ground your model's responses in rich, real-world data from Google Maps to provide factually accurate, location-aware answers
+- [Code execution](https://aistudio.google.com/docs/code-execution.md): Learn how to use the Gemini API code execution feature.
+- [URL context](https://aistudio.google.com/docs/url-context.md): Ground your model's responses in real-time information by providing URLs as context for more accurate and citation-backed answers.
+- [Computer use](https://aistudio.google.com/docs/computer-use.md): Learn how to use the Gemini API computer use feature.
+- [File search](https://aistudio.google.com/docs/file-search.md): Get started building RAG solutions with the File Search tool in the Gemini API
+- [Combine tools and function calling](https://aistudio.google.com/docs/tool-combination.md): Learn how to maintain context and enable built-in and custom tool combinations in the Gemini API.
+
+## Live API
+- [Get started — Using GenAI SDK](https://aistudio.google.com/docs/live-api/get-started-sdk.md): Build real-time Live API applications using the Google GenAI SDK.
+- [Get started — Using WebSockets](https://aistudio.google.com/docs/live-api/get-started-websocket.md): Build bidirectional Live API applications directly using raw WebSockets.
+- [Capabilities](https://aistudio.google.com/docs/live-api/capabilities.md): Explore the capabilities and configuration options of the Gemini Live API.
+- [Thinking](https://aistudio.google.com/docs/live-api/thinking.md): Learn about Thinking in the Gemini Live API, including architectural differences, interaction status tracking, and non-blocking tools.
+- [Live transcription](https://aistudio.google.com/docs/live-api/live-transcribe.md): Low-latency, real-time speech-to-text transcription using the gemini-3.5-transcribe-live model.
+- [Tool use](https://aistudio.google.com/docs/live-api/tools.md): Use tools with the Gemini Live API to enable external actions in real time.
+- [Session management](https://aistudio.google.com/docs/live-api/session-management.md): Manage real-time persistent sessions and connection states in the Live API.
+- [Ephemeral tokens](https://aistudio.google.com/docs/live-api/ephemeral-tokens.md): Learn how to generate short-lived ephemeral tokens for client-side authentication in the Live API.
+- [Best practices](https://aistudio.google.com/docs/live-api/best-practices.md): Learn best practices to optimize your use of the Gemini Live API.
+
+## Optimization
+- [Overview](https://aistudio.google.com/docs/optimization.md): Learn about the different inference and optimization options from the Gemini API.
+- [Batch API](https://aistudio.google.com/docs/batch-api.md): Get started building with the Batch API
+- [Webhooks](https://aistudio.google.com/docs/webhooks.md): Learn how to use webhooks in the Gemini API.
+- [Flex inference](https://aistudio.google.com/docs/flex-inference.md): Learn how to optimize costs with the Flex inference tier in the Interactions API
+- [Priority inference](https://aistudio.google.com/docs/priority-inference.md): Learn how to use Gemini Priority inference for business-critical workloads requiring lower latency.
+- [Context caching](https://aistudio.google.com/docs/caching.md): Learn how to use Context Caching in the Interactions API
+
+## Guides
+- [Interactions API](https://aistudio.google.com/docs/interactions-overview.md): The Interactions API is the simplest and recommended way to build with Gemini models and agents.
+- [Streaming](https://aistudio.google.com/docs/streaming.md): Learn how to stream responses, tool calls, thinking, and images in real time with the Interactions API.
+- [Background execution](https://aistudio.google.com/docs/background-execution.md): Run long-running background tasks and agents using background=true in the Interactions API.
+- [File input — Input methods](https://aistudio.google.com/docs/file-input-methods.md): Get started building with Gemini's multimodal capabilities in the Gemini API
+- [File input — Files API](https://aistudio.google.com/docs/files.md): Learn how to upload, manage, and process media files using the Gemini Interactions API.
+- [OpenAI compatibility](https://aistudio.google.com/docs/openai.md): Call Gemini models directly using standard OpenAI SDKs and REST endpoints.
+- [Media resolution](https://aistudio.google.com/docs/media-resolution.md): Learn about how to use media resolutions with multimodal inputs in the Interactions API.
+- [Token counting](https://aistudio.google.com/docs/tokens.md): Understand and count tokens with the Gemini API
+- [Prompt engineering](https://aistudio.google.com/docs/prompting-strategies.md): Get started designing prompts for Gemini AI models.
+- [Logs and datasets — Get started with logs](https://aistudio.google.com/docs/logs-datasets.md): Learn how to configure project logging, view logs in AI Studio, and create shared datasets.
+- [Logs and datasets — Data logs and sharing](https://aistudio.google.com/docs/logs-policy.md): The policy for sharing your data logs for Gemini improvements.
+- [Safety — Safety settings](https://aistudio.google.com/docs/safety-settings.md): Configure content moderation filters and safety thresholds in the Gemini API.
+- [Safety — Safety guidance](https://aistudio.google.com/docs/safety-guidance.md): Apply best practices for safety, fairness, and factuality in Gemini apps.
+- [Frameworks — LangChain & LangGraph](https://aistudio.google.com/docs/langgraph-example.md): Building LangGraph Agents with Gemini
+- [Frameworks — CrewAI](https://aistudio.google.com/docs/crewai-example.md): Building CrewAI Agents with Gemini
+- [Frameworks — LlamaIndex](https://aistudio.google.com/docs/llama-index.md): Building Research Agents with Gemini
+- [Frameworks — Vercel AI SDK](https://aistudio.google.com/docs/vercel-ai-sdk-example.md): Building apps with Gemini and the AI SDK by Vercel
+- [Frameworks — Temporal](https://aistudio.google.com/docs/temporal-example.md): Building durable AI agents with Gemini and Temporal
+
+## Resources
+- [Release notes](https://aistudio.google.com/docs/changelog.md): Keep track of updates to the Gemini API
+- [Deprecations](https://aistudio.google.com/docs/deprecations.md): Keep track of deprecation schedules for Gemini models and features
+- [Libraries](https://aistudio.google.com/docs/libraries.md): Download and get started with the Gemini API Libraries + SDKs
+- [Migration — To GenAI SDK](https://aistudio.google.com/docs/migrate.md): Migrate existing applications to the unified Google Gen AI SDK.
+- [Migration — To Interactions API](https://aistudio.google.com/docs/migrate-to-interactions.md): Guide for migrating from generateContent to the Interactions API.
+- [Migration — Interactions breaking changes (May 2026)](https://aistudio.google.com/docs/interactions-breaking-changes-may-2026.md): Guide for migrating to upcoming breaking changes in the Interactions API, including the steps schema and response format changes.
+- [Rate limits](https://aistudio.google.com/docs/rate-limits.md): Understand request quotas, token limits, and rate limits for the Gemini API.
+- [Billing info](https://aistudio.google.com/docs/billing.md): Understand Gemini API billing tiers, pricing structures, and usage charges.
+- [API troubleshooting](https://aistudio.google.com/docs/troubleshooting.md): Diagnose and resolve common errors and API exceptions when using Gemini.
+- [API errors](https://aistudio.google.com/docs/api-errors.md): Reference for Interactions API error codes and response format
+- [Partner and library integrations](https://aistudio.google.com/docs/partner-integration.md): Provide the Gemini API as an integration into your platform or library.
+- [Google AI Studio — Quickstart](https://aistudio.google.com/docs/ai-studio-quickstart.md): Get started with prompt engineering and prototyping in Google AI Studio.
+- [Google AI Studio — Google AI plans](https://aistudio.google.com/docs/google-ai-plans.md)
+- [Google AI Studio — Vibe code in Build](https://aistudio.google.com/docs/aistudio-build-mode.md): Learn how to build full-stack applications using the vibe coding experience in Google AI Studio.
+- [Google AI Studio — Full-stack apps](https://aistudio.google.com/docs/aistudio-fullstack.md): Learn how to develop full-stack applications with server-side logic in Google AI Studio.
+- [Google AI Studio — Build Android apps](https://aistudio.google.com/docs/aistudio-android.md): Learn how to build native Android apps with Kotlin and Jetpack Compose in Google AI Studio.
+- [Google AI Studio — Deploying your app](https://aistudio.google.com/docs/aistudio-deploying.md): Deploy full-stack generative AI applications directly from Google AI Studio.
+- [Google AI Studio — Agents in AI Studio](https://aistudio.google.com/docs/aistudio-agents.md): Learn how to use Agents in AI Studio
+- [Google AI Studio — Try out LearnLM](https://aistudio.google.com/docs/learnlm.md): Use pedagogical learning capabilities with standard Gemini models in AI Studio.
+- [Google AI Studio — Troubleshooting](https://aistudio.google.com/docs/troubleshoot-ai-studio.md): This page provides suggestions for troubleshooting Google AI Studio if you encounter issues.
+- [Google AI Studio — Google Workspace access](https://aistudio.google.com/docs/workspace.md): Access Google AI Studio and manage settings with a Workspace account.
+- [Google Cloud Platform — Gemini Enterprise Agent Platform Gemini API](https://aistudio.google.com/docs/migrate-to-cloud.md): When developing generative AI solutions with Gemini, Google offers two API products: the Gemini Developer API and the Gemini platform API.
+- [Google Cloud Platform — OAuth authentication](https://aistudio.google.com/docs/oauth.md): Authenticate to the Gemini API securely using OAuth client credentials.
+
+## Policies
+- [Terms of service](https://aistudio.google.com/docs/terms.md)
+- [Additional Terms of Service archive](https://aistudio.google.com/docs/terms-archive/index.md)
+- [Available regions](https://aistudio.google.com/docs/available-regions.md): Check the supported regions and access rules for AI Studio and Gemini API.
+- [Abuse monitoring](https://aistudio.google.com/docs/usage-policies.md): Review Gemini API terms of service, usage policies, and abuse monitoring.
+- [Feedback information](https://aistudio.google.com/docs/feedback-policies.md): Review AI Studio feedback workflows, data usage, and evaluation policies.
+
+## Optional
+- [Full documentation corpus (llms-full.txt)](https://aistudio.google.com/llms-full.txt): Complete concatenated documentation for context caching.
