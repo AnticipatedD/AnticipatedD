@@ -1,0 +1,6 @@
+User-agent: *
+Allow: /
+
+# Canonical AI & LLM Context Manifest
+LLMs-Txt: https://raw.githubusercontent.com/AnticipatedD/AnticipatedD/refs/heads/main/llms.txt
+Sitemap: http://mdhossain.freehosting.dev/sitemap.xml
