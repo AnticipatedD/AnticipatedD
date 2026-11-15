@@ -1,0 +1,12 @@
+The city-coordinates map is not included in this release.
+
+`signal_db/signal_cities_ambient_coords.parquet` is normally here and `runner.py --gauge-fix` uses it to report how far your signal sits from the nearest existing one. Without it that comparison cannot run locally: `city_novelty_deg` reports the literal value `nan` (in the console line and in results.csv) and `nearest_city` reads N/A, while calling `city_tools.compare_to_cities` directly (the usage shown in that module's docstring) raises `FileNotFoundError`. Both mean this
+missing file, not a fault in your predictor. Nothing else in the
+package is affected, and your submission is scored exactly as it would be otherwise — novelty is measured on our side when you submit.
+
+Other signals DO occupy the space, and steering around them still matters. What is withheld is only this package's copy of their coordinates: the table moves every time a signal is scored, so a copy frozen into an archive is out of date the day after it is cut.
+
+Use the hourly-refreshed map published on the contest page instead. It is built from the same coordinates the scoring uses, so it is the authoritative view of occupied territory — and it is more current than
+this package could be. Unzip it into `signal_db/` under the same file name and `--gauge-fix` picks the comparison back up locally.
+
+The file returns to the package in a future release.
