@@ -6,26 +6,25 @@ from predictor import Predictor
 
 warnings.filterwarnings("ignore")
 
-
 class AmonRaS2V10Predictor(Predictor):
     def __init__(self):
         self.model = None
         self.params = {
             "objective": "reg:squarederror",
-            "max_depth": 3,
-            "eta": 0.02,
-            "subsample": 0.8,
-            "colsample_bytree": 0.8,
-            "min_child_weight": 300,
-            "reg_lambda": 6.0,
-            "reg_alpha": 0.8,
+            "max_depth": 4,
+            "eta": 0.12,
+            "subsample": 0.6,
+            "colsample_bytree": 0.6,
+            "min_child_weight": 400,
+            "reg_lambda": 5.0,
+            "reg_alpha": 1.0,
             "seed": 42,
             "verbosity": 0,
             "nthread": 4,
         }
-        self.n_rounds = 50
-        self.smooth_span = 100
-        self.tilt_span = 400
+        self.n_rounds = 40
+        self.smooth_span = 200
+        self.tilt_span = 1400
 
     @staticmethod
     def _csrank(df: pd.DataFrame) -> pd.DataFrame:
@@ -36,7 +35,7 @@ class AmonRaS2V10Predictor(Predictor):
     @staticmethod
     def _get_feat(features: pd.DataFrame, name: str) -> pd.DataFrame:
         if isinstance(features.columns, pd.MultiIndex):
-            for lvl in range(features.columns.nlevels):%
+            for lvl in range(features.columns.nlevels):
                 if name in features.columns.get_level_values(lvl):
                     return features.xs(name, level=lvl, axis=1)
         if name in features.columns:
@@ -81,7 +80,6 @@ class AmonRaS2V10Predictor(Predictor):
         pred = pd.DataFrame(raw.reshape(-1, len(tickers)), index=index, columns=tickers)
         pred = pred.ewm(span=self.smooth_span, min_periods=1).mean()
         tilt = pred.shift(1).ewm(span=self.tilt_span, min_periods=1).mean()
-        pred = (pred - tilt).fillna(0.0)
         mean = pred.mean(axis=1)
         std = pred.std(axis=1).replace(0, 1.0)
-        return pred.sub(mean, axis=0).div(std, axis=0).fillna(0.0)
+        pred = (pred - tilt).fillna(0.0)
