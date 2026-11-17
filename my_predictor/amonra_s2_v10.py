@@ -45,38 +45,33 @@ class AmonRaS2V11Predictor(Predictor):
 
     def _blocks(self, features: pd.DataFrame) -> dict[str, pd.DataFrame]:
         g = {i: features[f"Feature.{i}"] for i in range(1, 7)}
-        r = {i: self._csrank(g[i]) for i in range(1, 7)}
+        r = {i: self._csrank(g.get(i)) for i in range(1, 7)}
 
-        s24 = g - g
-        s12 = g - g
-        s13 = g - g
+        s24 = g.get(2) - g.get(4)
+        s12 = g.get(1) - g.get(2)
+        s13 = g.get(1) - g.get(3)
 
         return {
-            # 1-3: Core ranked spreads (IC anchor)
             "d24": self._csrank(s24),
             "d12": self._csrank(s12),
             "d13": self._csrank(s13),
-            # 4-6: Multi-factor rank interactions
-            "m23_6": (r - r) * r,
-            "m24_5": (r - r) * r,
-            "p56": r * r,
-            # 7-8: Base rank anchors
-            "r6": r,
-            "r5": r,
-            # 9-11: Non-linear & robust dispersion novelty signals
-            "nl_14_6": self._csrank(g + g) * self._csrank(g.abs()),
-            "nl_35_2": np.tanh(2.0 * r) * (r - r),
-            "ratio_16": self._csrank(self._cs_robust_z(g)) - r,
-            # 12-13: Temporal momentum & mean-reversion novelty signals
+            "m23_6": (r.get(2) - r.get(3)) * r.get(6),
+            "m24_5": (r.get(2) - r.get(4)) * r.get(5),
+            "p56": r.get(5) * r.get(6),
+            "r6": r.get(6),
+            "r5": r.get(5),
+            "nl_14_6": self._csrank(g.get(1) + g.get(4)) * self._csrank(g.get(6).abs()),
+            "nl_35_2": np.tanh(2.0 * r.get(3)) * (r.get(5) - r.get(2)),
+            "ratio_16": self._csrank(self._cs_robust_z(g.get(1))) - r.get(6),
             "ts_delta_24": self._csrank(s24.diff(5).fillna(0.0)),
-            "ts_rev_13": -self._csrank(g - g.ewm(span=12, min_periods=1).mean()) * r,
+            "ts_rev_13": -self._csrank(g.get(1) - g.get(1).ewm(span=12, min_periods=1).mean()) * r.get(3),
         }
 
     def _design(self, features: pd.DataFrame):
         b = self._blocks(features)
-        tickers = list(b["d24"].columns)
+        tickers = list(b.get("d24").columns)
         X = np.hstack([d[tickers].values.reshape(-1, 1) for d in b.values()])
-        return X, tickers, b["d24"].index
+        return X, tickers, b.get("d24").index
 
     def train(self, features: pd.DataFrame, target: pd.DataFrame) -> None:
         X, tickers, _ = self._design(features)
@@ -94,16 +89,13 @@ class AmonRaS2V11Predictor(Predictor):
         raw = self.model.predict(xgb.DMatrix(np.nan_to_num(X)))
         pred = pd.DataFrame(raw.reshape(-1, len(tickers)), index=index, columns=tickers)
 
-        # Fast-capture EMA smoothing & structural drift removal
         pred = pred.ewm(span=self.smooth_span, min_periods=1).mean()
         tilt = pred.shift(1).ewm(span=self.tilt_span, min_periods=1).mean()
         pred = (pred - tilt).fillna(0.0)
 
-        # Volatility stabilization (reduces IC Std & Compression Loss)
         mean = pred.mean(axis=1)
         std = pred.std(axis=1).replace(0.0, 1.0)
         pred = pred.sub(mean, axis=0).div(std, axis=0).fillna(0.0)
         pred = pred.clip(-4.0, 4.0)
 
-        # Mandatory cross-sectional de-meaning
         return pred.sub(pred.mean(axis=1), axis=0).fillna(0.0)
