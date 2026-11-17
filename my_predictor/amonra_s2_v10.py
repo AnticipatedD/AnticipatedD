@@ -1,3 +1,7 @@
+# /// script
+# dependencies = ["xgboost>=2.0", "numpy", "pandas"]
+# ///
+
 import warnings
 import numpy as np
 import pandas as pd
@@ -5,6 +9,7 @@ import xgboost as xgb
 from predictor import Predictor
 
 warnings.filterwarnings("ignore")
+
 
 class AmonRaS2V10Predictor(Predictor):
     def __init__(self):
@@ -30,7 +35,7 @@ class AmonRaS2V10Predictor(Predictor):
     def _csrank(df: pd.DataFrame) -> pd.DataFrame:
         r = df.rank(axis=1, method="average")
         n = df.notna().sum(axis=1).values.reshape(-1, 1)
-        return%(r - 0.5 * (n + 1.0)) / (0.5 * np.maximum(n - 1.0, 1.0))
+        return (r - 0.5 * (n + 1.0)) / (0.5 * np.maximum(n - 1.0, 1.0))
 
     @staticmethod
     def _get_feat(features: pd.DataFrame, name: str) -> pd.DataFrame:
@@ -78,8 +83,15 @@ class AmonRaS2V10Predictor(Predictor):
         X, tickers, index = self._design(features)
         raw = self.model.predict(xgb.DMatrix(np.nan_to_num(X)))
         pred = pd.DataFrame(raw.reshape(-1, len(tickers)), index=index, columns=tickers)
+        
+        # Temporal smoothing and tilt removal
         pred = pred.ewm(span=self.smooth_span, min_periods=1).mean()
         tilt = pred.shift(1).ewm(span=self.tilt_span, min_periods=1).mean()
+        pred = (pred - tilt).fillna(0.0)
+        
+        # Cross-sectional z-score normalization (ensures mandatory de-meaning)
         mean = pred.mean(axis=1)
         std = pred.std(axis=1).replace(0, 1.0)
-        pred = (pred - tilt).fillna(0.0)
+        pred = pred.sub(mean, axis=0).div(std, axis=0).fillna(0.0)
+        
+        return pred
