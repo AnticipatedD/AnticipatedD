@@ -7,17 +7,17 @@ from predictor import Predictor
 warnings.filterwarnings("ignore")
 
 
-class MyPredictor(Predictor):
+class AmonRaS2V15Predictor(Predictor):
     def __init__(
         self,
-        feature_mode: str = "v8_base",
-        smooth_span: int = 300,
-        tilt_span: int = 1800,
-        n_rounds: int = 30,
+        feature_mode: str = "v8_plus_ortho3",
+        smooth_span: int = 120,
+        tilt_span: int = 900,
+        n_rounds: int = 40,
         max_depth: int = 2,
         min_child_weight: int = 600,
         eta: float = 0.04,
-        shrink_tails: bool = False,
+        shrink_tails: bool = True,
     ):
         super().__init__()
         self.model = None
@@ -61,7 +61,6 @@ class MyPredictor(Predictor):
         r5 = self._csrank(g5)
         r6 = self._csrank(g6)
 
-        # Exact V8 8-signal core
         blocks = {
             "d24": self._csrank(g2 - g4),
             "d12": self._csrank(g1 - g2),
@@ -73,7 +72,6 @@ class MyPredictor(Predictor):
             "r5": r5,
         }
 
-        # Add only orthogonal non-linearities (skipping redundant ratio_16 & ts_delta_24)
         if self.feature_mode == "v8_plus_ortho3":
             ema12_f1 = g1.ewm(span=12, min_periods=1).mean()
             blocks["nl_14_6"] = self._csrank(g1 + g4) * self._csrank(g6.abs())
@@ -109,7 +107,6 @@ class MyPredictor(Predictor):
         pred = (pred - tilt).fillna(0.0)
         pred = pred.sub(pred.mean(axis=1), axis=0).fillna(0.0)
 
-        # Optional soft tail compression to reduce Concentration (0.1218 -> lower)
         if self.shrink_tails:
             scale = pred.abs().quantile(0.90, axis=1).replace(0.0, 1.0).fillna(1.0)
             pred = np.tanh(pred.div(scale * 1.5, axis=0))
@@ -118,65 +115,22 @@ class MyPredictor(Predictor):
         return pred
 
 
-def evaluate_predictions(pred: pd.DataFrame, target: pd.DataFrame) -> dict:
-    """Computes AlphaNova proxy metrics: Sharpe, Mean IC, IC Std, and Concentration."""
-    common_idx = pred.index.intersection(target.index)
-    common_cols = pred.columns.intersection(target.columns)
-    P = pred.loc[common_idx, common_cols]
-    Y = target.loc[common_idx, common_cols]
+if __name__ == "__main__":
+    import os
 
-    # Row-wise Pearson IC
-    daily_ic = P.corrwith(Y, axis=1).dropna()
-    mean_ic = float(daily_ic.mean())
-    ic_std = float(daily_ic.std())
+    if os.path.exists("features.parquet") and os.path.exists("target.parquet"):
+        features = pd.read_parquet("features.parquet")
+        target = pd.read_parquet("target.parquet")
+    elif os.path.exists("data/features.parquet") and os.path.exists("data/target.parquet"):
+        features = pd.read_parquet("data/features.parquet")
+        target = pd.read_parquet("data/target.parquet")
+    else:
+        raise FileNotFoundError("Could not locate features.parquet and target.parquet.")
 
-    # Cross-sectional dollar-neutral PnL & Annualized Sharpe
-    pnl = (P * Y).mean(axis=1).dropna()
-    sharpe = float((pnl.mean() / (pnl.std() + 1e-12)) * np.sqrt(252))
-
-    # Weight concentration (mean squared weight share)
-    abs_w = P.abs()
-    w_norm = abs_w.div(abs_w.sum(axis=1).replace(0.0, np.nan), axis=0)
-    concentration = float((w_norm ** 2).sum(axis=1).mean())
-
-    return {
-        "Sharpe": sharpe,
-        "Mean_IC": mean_ic,
-        "IC_Std": ic_std,
-        "Conc": concentration,
-    }
-
-
-def run_sweep():
-    # Load local competition dataset via runner.py helper if available
-    try:
-        import runner
-        if hasattr(runner, "load_data"):
-            features, target = runner.load_data()
-        else:
-            raise AttributeError("Use standard parquet/csv fallback")
-    except Exception:
-        # Standard AlphaNova local data filenames
-        import os
-        if os.path.exists("features.parquet") and os.path.exists("target.parquet"):
-            features = pd.read_parquet("features.parquet")
-            target = pd.read_parquet("target.parquet")
-        elif os.path.exists("data/features.parquet") and os.path.exists("data/target.parquet"):
-            features = pd.read_parquet("data/features.parquet")
-            target = pd.read_parquet("data/target.parquet")
-        else:
-            raise FileNotFoundError(
-                "Could not auto-locate features.parquet / target.parquet. "
-                "Check runner.py for the exact data path and update run_sweep()."
-            )
-
-    # Chronological 70/30 OOS split
     dates = features.index.unique()
     split_date = dates[int(0.70 * len(dates))]
-    feat_train = features.loc[:split_date]
-    targ_train = target.loc[:split_date]
-    feat_val = features.loc[split_date:]
-    targ_val = target.loc[split_date:]
+    feat_train, targ_train = features.loc[:split_date], target.loc[:split_date]
+    feat_val, targ_val = features.loc[split_date:], target.loc[split_date:]
 
     experiments = [
         ("1_V8_Exact_Baseline", dict(feature_mode="v8_base", smooth_span=300, tilt_span=1800, n_rounds=30, shrink_tails=False)),
@@ -191,15 +145,20 @@ def run_sweep():
     print("-" * 68)
 
     for name, cfg in experiments:
-        model = V8SweepCandidate(**cfg)
+        model = AmonRaS2V14Predictor(**cfg)
         model.train(feat_train, targ_train)
         preds = model.predict(feat_val)
-        metrics = evaluate_predictions(preds, targ_val)
-        print(
-            f"{name:<22} | {metrics['Sharpe']:>10.4f} | {metrics['Mean_IC']:>9.4f} | "
-            f"{metrics['IC_Std']:>8.4f} | {metrics['Conc']:>8.4f}"
-        )
 
+        common_idx = preds.index.intersection(targ_val.index)
+        common_cols = preds.columns.intersection(targ_val.columns)
+        P = preds.loc[common_idx, common_cols]
+        Y = targ_val.loc[common_idx, common_cols]
 
-if __name__ == "__main__":
-    run_sweep()
+        daily_ic = P.corrwith(Y, axis=1).dropna()
+        pnl = (P * Y).mean(axis=1).dropna()
+        sharpe = float((pnl.mean() / (pnl.std() + 1e-12)) * np.sqrt(252))
+        abs_w = P.abs()
+        w_norm = abs_w.div(abs_w.sum(axis=1).replace(0.0, np.nan), axis=0)
+        conc = float((w_norm ** 2).sum(axis=1).mean())
+
+        print(f"{name:<22} | {sharpe:>10.4f} | {daily_ic.mean():>9.4f} | {daily_ic.std():>8.4f} | {conc:>8.4f}")
