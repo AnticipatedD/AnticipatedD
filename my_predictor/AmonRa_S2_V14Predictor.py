@@ -11,7 +11,7 @@ from predictor import Predictor
 warnings.filterwarnings("ignore")
 
 
-class AmonRaS2V13Predictor(Predictor): 
+class AmonRaS2V14Predictor(Predictor): 
 # Local Diagnostic & Backtest Script (AmonRaS2V12Predictor)
 # Mirrors the 13-signal feature engineering, 70% GBDT + 30% Ridge blend,
 # EMA smoothing/de-tilting, and cross-sectional standardization.
