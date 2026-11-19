@@ -7,7 +7,7 @@ from predictor import Predictor
 warnings.filterwarnings("ignore")
 
 
-class AmonRaS2V14Predictor(Predictor):
+class AmonRaS2V15Predictor(Predictor):
     def __init__(self):
         super().__init__()
         self.gbdt_model = None
@@ -17,21 +17,21 @@ class AmonRaS2V14Predictor(Predictor):
 
         self.params = {
             "objective": "reg:squarederror",
-            "max_depth": 3,
-            "eta": 0.06,
+            "max_depth": 2,
+            "eta": 0.04,
             "subsample": 0.8,
-            "colsample_bytree": 0.55,
-            "min_child_weight": 350,
-            "reg_lambda": 1.0,
-            "reg_alpha": 0.0,
+            "colsample_bytree": 0.65,
+            "min_child_weight": 500,
+            "reg_lambda": 8.0,
+            "reg_alpha": 1.0,
             "seed": 42,
             "verbosity": 0,
             "nthread": 4,
         }
-        self.n_rounds = 65
-        self.ridge_alpha = 5000.0
-        self.smooth_span = 45
-        self.tilt_span = 450
+        self.n_rounds = 45
+        self.ridge_alpha = 8000.0
+        self.smooth_span = 300
+        self.tilt_span = 1800
 
     @staticmethod
     def _csrank(df: pd.DataFrame) -> pd.DataFrame:
@@ -48,30 +48,41 @@ class AmonRaS2V14Predictor(Predictor):
         return z.clip(-4.0, 4.0)
 
     def _blocks(self, features: pd.DataFrame) -> dict[str, pd.DataFrame]:
-        g = {i: features[f"Feature.{i}"] for i in range(1, 7)}
-        r = {i: self._csrank(g[i]) for i in range(1, 7)}
+        g1 = features["Feature.1"]
+        g2 = features["Feature.2"]
+        g3 = features["Feature.3"]
+        g4 = features["Feature.4"]
+        g5 = features["Feature.5"]
+        g6 = features["Feature.6"]
 
-        s24 = g[2] - g[4]
-        s12 = g[1] - g[2]
-        s13 = g[1] - g[3]
+        r1 = self._csrank(g1)
+        r2 = self._csrank(g2)
+        r3 = self._csrank(g3)
+        r4 = self._csrank(g4)
+        r5 = self._csrank(g5)
+        r6 = self._csrank(g6)
+
+        s24 = g2 - g4
+        s12 = g1 - g2
+        s13 = g1 - g3
 
         diff5_s24 = s24.diff(5).fillna(0.0)
-        ema12_f1 = g[1].ewm(span=12, min_periods=1).mean()
+        ema12_f1 = g1.ewm(span=12, min_periods=1).mean()
 
         return {
             "d24": self._csrank(s24),
             "d12": self._csrank(s12),
             "d13": self._csrank(s13),
-            "m23_6": (r[2] - r[3]) * r[6],
-            "m24_5": (r[2] - r[4]) * r[5],
-            "p56": r[5] * r[6],
-            "r6": r[6],
-            "r5": r[5],
-            "nl_14_6": self._csrank(g[1] + g[4]) * self._csrank(g[6].abs()),
-            "nl_35_2": np.tanh(2.0 * r[3]) * (r[5] - r[2]),
-            "ratio_16": self._csrank(self._cs_robust_z(g[1])) - r[6],
+            "m23_6": (r2 - r3) * r6,
+            "m24_5": (r2 - r4) * r5,
+            "p56": r5 * r6,
+            "r6": r6,
+            "r5": r5,
+            "nl_14_6": self._csrank(g1 + g4) * self._csrank(g6.abs()),
+            "nl_35_2": np.tanh(2.0 * r3) * (r5 - r2),
+            "ratio_16": self._csrank(self._cs_robust_z(g1)) - r6,
             "ts_delta_24": self._csrank(diff5_s24),
-            "ts_rev_13": -self._csrank(g[1] - ema12_f1) * r[3],
+            "ts_rev_13": -self._csrank(g1 - ema12_f1) * r3,
         }
 
     def _design(self, features: pd.DataFrame):
@@ -88,7 +99,7 @@ class AmonRaS2V14Predictor(Predictor):
         X_train = X[ok]
         y_train = y[ok]
 
-        # 1. Train 70% GBDT
+        # 1. Train 70% GBDT (V8-aligned regularization across 13 signals)
         self.gbdt_model = xgb.train(
             self.params,
             xgb.DMatrix(X_train, label=y_train),
@@ -124,15 +135,10 @@ class AmonRaS2V14Predictor(Predictor):
 
         pred = pd.DataFrame(raw_blend.reshape(-1, len(tickers)), index=index, columns=tickers)
 
-        # EMA Smoothing (span = 45) & Lagged Drift De-tilting (span = 450)
+        # EMA Smoothing (span = 300) & Lagged Drift De-tilting (span = 1800)
         pred = pred.ewm(span=self.smooth_span, min_periods=1).mean()
         tilt = pred.shift(1).ewm(span=self.tilt_span, min_periods=1).mean()
         pred = (pred - tilt).fillna(0.0)
 
-        # Cross-sectional Z-Score, [-4, 4] Clip, and Mandatory De-meaning
-        cs_mean = pred.mean(axis=1)
-        cs_std = pred.std(axis=1, ddof=1).replace(0.0, 1.0).fillna(1.0)
-        pred = pred.sub(cs_mean, axis=0).div(cs_std, axis=0)
-        pred = pred.clip(-4.0, 4.0)
-
+        # Cross-sectional zero row-mean (preserving natural conviction magnitude)
         return pred.sub(pred.mean(axis=1), axis=0).fillna(0.0)
