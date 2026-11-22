@@ -10,7 +10,7 @@ warnings.filterwarnings("ignore")
 class MyPredictor(Predictor):
     def __init__(self):
         self.models = []
-        self.seeds = (11, 29, 53, 97)
+        self.seeds = (23, 67, 149)
         self.params = {
             "objective": "reg:pseudohubererror",
             "huber_slope": 0.015,
@@ -19,16 +19,16 @@ class MyPredictor(Predictor):
             "subsample": 0.75,
             "colsample_bytree": 0.70,
             "min_child_weight": 950,
-            "reg_lambda": 22.0,
+            "reg_lambda": 24.0,
             "reg_alpha": 2.0,
             "verbosity": 0,
             "nthread": 4,
         }
         self.n_rounds = 28
-        self.ema1_span = 340
-        self.ema2_span = 210
-        self.slow_span = 2400
-        self.trade_band = 0.34
+        self.ema1_span = 520
+        self.ema2_span = 340
+        self.slow_span = 2800
+        self.trade_band = 0.32
 
     @staticmethod
     def _csrank(df: pd.DataFrame) -> pd.DataFrame:
@@ -54,34 +54,36 @@ class MyPredictor(Predictor):
         r = {i: self._csrank(g.get(i)) for i in range(1, 7)}
         z = {i: self._csz(g.get(i)) for i in range(1, 7)}
 
-        d24 = g.get(2) - g.get(4)
-        s24 = self._csrank(d24)
-        s12 = self._csrank(self._orthogonalize(g.get(1) - g.get(2), d24))
-        s13 = self._csrank(self._orthogonalize(g.get(1) - g.get(3), d24))
+        # Orthogonal subspace anchored on Feature.3, Feature.4, and Feature.5
+        d34 = g.get(3) - g.get(4)
+        s34 = self._csrank(d34)
+        s41 = self._csrank(self._orthogonalize(g.get(4) - g.get(1), d34))
+        s32 = self._csrank(self._orthogonalize(g.get(3) - g.get(2), d34))
 
-        raw_disp = (g.get(1).std(axis=1) + g.get(2).std(axis=1) + g.get(4).std(axis=1)) / 3.0
+        # True raw cross-sectional dispersion on F3/F4/F5
+        raw_disp = (g.get(3).std(axis=1) + g.get(4).std(axis=1) + g.get(5).std(axis=1)) / 3.0
         disp_ratio = (
-            raw_disp / raw_disp.ewm(span=240, min_periods=1).mean().replace(0.0, np.nan)
+            raw_disp / raw_disp.ewm(span=300, min_periods=1).mean().replace(0.0, np.nan)
         ).fillna(1.0).clip(0.5, 2.0)
 
         return {
-            "s24": s24,
-            "s12": s12,
-            "s13": s13,
-            "i23_6": (r.get(2) - r.get(3)) * r.get(6),
-            "i24_5": (r.get(2) - r.get(4)) * r.get(5),
-            "i14_6": (r.get(1) - r.get(4)) * r.get(6),
-            "quad_56": np.tanh(z.get(5) * z.get(6)),
-            "disp_s24": s24.mul(disp_ratio, axis=0),
+            "s34": s34,
+            "s41": s41,
+            "s32": s32,
+            "i34_5": (r.get(3) - r.get(4)) * r.get(5),
+            "i41_6": (r.get(4) - r.get(1)) * r.get(6),
+            "quad_35": np.tanh(z.get(3) * z.get(5)),
+            "quad_45": np.tanh(z.get(4) * z.get(5)),
+            "disp_s34": s34.mul(disp_ratio, axis=0),
+            "r4": r.get(4),
             "r5": r.get(5),
-            "r6": r.get(6),
         }
 
     def _design(self, features: pd.DataFrame):
         b = self._blocks(features)
-        tickers = list(b["s24"].columns)
+        tickers = list(b["s34"].columns)
         X = np.hstack([d[tickers].values.reshape(-1, 1) for d in b.values()])
-        return X, tickers, b["s24"].index
+        return X, tickers, b["s34"].index
 
     def train(self, features: pd.DataFrame, target: pd.DataFrame) -> None:
         X, tickers, _ = self._design(features)
@@ -104,20 +106,17 @@ class MyPredictor(Predictor):
         raw = np.mean([m.predict(dtest) for m in self.models], axis=0)
         pred = pd.DataFrame(raw.reshape(-1, len(tickers)), index=index, columns=tickers)
 
-        # 2nd-order causal low-pass filter + full slow baseline removal
         lp1 = pred.ewm(span=self.ema1_span, min_periods=1).mean()
         lp2 = lp1.ewm(span=self.ema2_span, min_periods=1).mean()
         slow = lp2.shift(1).ewm(span=self.slow_span, min_periods=1).mean()
         signal = (lp2 - slow).fillna(0.0)
 
-        # Cross-sectional unit-variance targeting + conviction power
         p = signal.sub(signal.mean(axis=1), axis=0).fillna(0.0)
         scale = p.std(axis=1).replace(0.0, np.nan)
         z = p.div(scale, axis=0).fillna(0.0).clip(-3.0, 3.0)
         target_pos = np.sign(z) * (z.abs() ** 1.35)
         target_pos = target_pos.sub(target_pos.mean(axis=1), axis=0).fillna(0.0)
 
-        # Causal Hysteresis deadband (0.34) cuts remaining 5 bp hourly turnover drag
         arr = target_pos.values
         n_rows, _ = arr.shape
         held = np.zeros_like(arr)
