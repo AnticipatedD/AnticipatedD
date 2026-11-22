@@ -7,26 +7,26 @@ from predictor import Predictor
 warnings.filterwarnings("ignore")
 
 
-class AmonRaS2V24Predictor(Predictor):
+class AmonRa_S2_V25Predictor(Predictor):
     def __init__(self):
         self.models = []
-        self.seeds = (42, 777)
-        # V21's winning regularization that pushed IC to 0.0398 and Sharpe to 0.0037
+        self.seeds = (11, 29, 53)
         self.params = {
-            "objective": "reg:squarederror",
+            "objective": "reg:pseudohubererror",
+            "huber_slope": 0.015,
             "max_depth": 2,
-            "eta": 0.035,
+            "eta": 0.03,
             "subsample": 0.75,
-            "colsample_bytree": 0.75,
-            "min_child_weight": 1000,
-            "reg_lambda": 20.0,
-            "reg_alpha": 2.0,
+            "colsample_bytree": 0.70,
+            "min_child_weight": 900,
+            "reg_lambda": 18.0,
+            "reg_alpha": 1.5,
             "verbosity": 0,
             "nthread": 4,
         }
-        self.n_rounds = 26
-        self.smooth_span = 420
-        self.tilt_span = 2200
+        self.n_rounds = 28
+        self.fast_span = 360
+        self.slow_span = 2160
 
     @staticmethod
     def _csrank(df: pd.DataFrame) -> pd.DataFrame:
@@ -34,26 +34,39 @@ class AmonRaS2V24Predictor(Predictor):
         n = df.notna().sum(axis=1).values.reshape(-1, 1)
         return (r - 0.5 * (n + 1.0)) / (0.5 * np.maximum(n - 1.0, 1.0))
 
+    @staticmethod
+    def _orthogonalize(target_df: pd.DataFrame, basis_df: pd.DataFrame) -> pd.DataFrame:
+        num = (target_df * basis_df).sum(axis=1)
+        den = (basis_df * basis_df).sum(axis=1).replace(0.0, np.nan)
+        beta = (num / den).fillna(0.0)
+        return target_df.sub(basis_df.mul(beta, axis=0), axis=0)
+
     def _blocks(self, features: pd.DataFrame) -> dict[str, pd.DataFrame]:
-        # Strictly the 8 pure features from V8 & V12 (no double-smoothed features)
         g = {i: features[f"Feature.{i}"] for i in range(1, 7)}
         r = {i: self._csrank(g.get(i)) for i in range(1, 7)}
+
+        # Orthogonalized spreads remove redundant cross-sectional collinearity
+        s24 = self._csrank(g.get(2) - g.get(4))
+        s12 = self._csrank(self._orthogonalize(g.get(1) - g.get(2), g.get(2) - g.get(4)))
+        s13 = self._csrank(self._orthogonalize(g.get(1) - g.get(3), g.get(2) - g.get(4)))
+
         return {
-            "d24": self._csrank(g.get(2) - g.get(4)),
-            "d12": self._csrank(g.get(1) - g.get(2)),
-            "d13": self._csrank(g.get(1) - g.get(3)),
-            "m23_6": (r.get(2) - r.get(3)) * r.get(6),
-            "m24_5": (r.get(2) - r.get(4)) * r.get(5),
+            "s24": s24,
+            "s12": s12,
+            "s13": s13,
+            "i23_6": (r.get(2) - r.get(3)) * r.get(6),
+            "i24_5": (r.get(2) - r.get(4)) * r.get(5),
+            "i14_6": (r.get(1) - r.get(4)) * r.get(6),
             "p56": r.get(5) * r.get(6),
-            "r6": r.get(6),
             "r5": r.get(5),
+            "r6": r.get(6),
         }
 
     def _design(self, features: pd.DataFrame):
         b = self._blocks(features)
-        tickers = list(b["d24"].columns)
+        tickers = list(b["s24"].columns)
         X = np.hstack([d[tickers].values.reshape(-1, 1) for d in b.values()])
-        return X, tickers, b["d24"].index
+        return X, tickers, b["s24"].index
 
     def train(self, features: pd.DataFrame, target: pd.DataFrame) -> None:
         X, tickers, _ = self._design(features)
@@ -76,15 +89,12 @@ class AmonRaS2V24Predictor(Predictor):
         raw = np.mean([m.predict(dtest) for m in self.models], axis=0)
         pred = pd.DataFrame(raw.reshape(-1, len(tickers)), index=index, columns=tickers)
 
-        # V21's exact 0.0398-IC trend filter
-        pred = pred.ewm(span=self.smooth_span, min_periods=1).mean()
-        tilt = pred.shift(1).ewm(span=self.tilt_span, min_periods=1).mean()
-        pred = (pred - tilt).fillna(0.0)
+        # Dual-horizon band-pass extraction
+        fast = pred.ewm(span=self.fast_span, min_periods=1).mean()
+        slow = fast.shift(1).ewm(span=self.slow_span, min_periods=1).mean()
+        signal = (fast - slow).fillna(0.0)
 
-        # Demean without per-bar std normalization (preserves V8's 26+ Global Novelty)
-        p = pred.sub(pred.mean(axis=1), axis=0).fillna(0.0)
-
-        # Scale-free conviction power (1.35): suppresses near-zero turnover noise
-        # like V21 while keeping natural cross-sectional dispersion intact
-        out = np.sign(p) * (p.abs() ** 1.35)
+        # Cross-sectional de-meaning + scale-free tail sharpening
+        p = signal.sub(signal.mean(axis=1), axis=0).fillna(0.0)
+        out = np.sign(p) * (p.abs() ** 1.30)
         return out.sub(out.mean(axis=1), axis=0).fillna(0.0)
