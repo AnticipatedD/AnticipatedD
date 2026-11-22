@@ -7,10 +7,10 @@ from predictor import Predictor
 warnings.filterwarnings("ignore")
 
 
-class AmonRaS2V21Predictor(Predictor):
+class AmonRaS2V23Predictor(Predictor):
     def __init__(self):
-        self.model = None
-        # Combines V8's raw-target magnitude learning with V11's lower IC Std regularization
+        self.models = []
+        self.seeds = (42, 777)
         self.params = {
             "objective": "reg:squarederror",
             "max_depth": 2,
@@ -18,15 +18,14 @@ class AmonRaS2V21Predictor(Predictor):
             "subsample": 0.75,
             "colsample_bytree": 0.75,
             "min_child_weight": 1000,
-            "reg_lambda": 20.0,
+            "reg_lambda": 22.0,
             "reg_alpha": 2.0,
-            "seed": 42,
             "verbosity": 0,
             "nthread": 4,
         }
         self.n_rounds = 26
-        self.smooth_span = 420
-        self.tilt_span = 2200
+        self.smooth_span = 480
+        self.tilt_span = 2400
 
     @staticmethod
     def _csrank(df: pd.DataFrame) -> pd.DataFrame:
@@ -37,7 +36,15 @@ class AmonRaS2V21Predictor(Predictor):
     def _blocks(self, features: pd.DataFrame) -> dict[str, pd.DataFrame]:
         g = {i: features[f"Feature.{i}"] for i in range(1, 7)}
         r = {i: self._csrank(g.get(i)) for i in range(1, 7)}
+
+        # Slow structural ranks (240-bar) to boost Global Novelty while staying gate-safe
+        rs2 = r.get(2).ewm(span=240, min_periods=1).mean()
+        rs3 = r.get(3).ewm(span=240, min_periods=1).mean()
+        rs4 = r.get(4).ewm(span=240, min_periods=1).mean()
+        rs6 = r.get(6).ewm(span=240, min_periods=1).mean()
+
         return {
+            # V12 0.0398-IC core
             "d24": self._csrank(g.get(2) - g.get(4)),
             "d12": self._csrank(g.get(1) - g.get(2)),
             "d13": self._csrank(g.get(1) - g.get(3)),
@@ -46,6 +53,9 @@ class AmonRaS2V21Predictor(Predictor):
             "p56": r.get(5) * r.get(6),
             "r6": r.get(6),
             "r5": r.get(5),
+            # 2 orthogonal slow-regime features for Global Novelty
+            "sd24": self._csrank(rs2 - rs4),
+            "sm23_6": (rs2 - rs3) * rs6,
         }
 
     def _design(self, features: pd.DataFrame):
@@ -56,32 +66,33 @@ class AmonRaS2V21Predictor(Predictor):
 
     def train(self, features: pd.DataFrame, target: pd.DataFrame) -> None:
         X, tickers, _ = self._design(features)
-        # Raw target (from V8) preserves return magnitude weighting -> higher IC (0.038+)
         y = target[tickers].values.reshape(-1)
         ok = np.isfinite(y) & np.isfinite(X).all(axis=1)
-        self.model = xgb.train(
-            self.params,
-            xgb.DMatrix(X[ok], label=y[ok]),
-            num_boost_round=self.n_rounds,
-        )
+
+        dtrain = xgb.DMatrix(X[ok], label=y[ok])
+        self.models = []
+        for s in self.seeds:
+            p = dict(self.params, seed=s)
+            self.models.append(
+                xgb.train(p, dtrain, num_boost_round=self.n_rounds)
+            )
 
     def predict(self, features: pd.DataFrame) -> pd.DataFrame:
-        assert self.model is not None
+        assert len(self.models) > 0
         X, tickers, index = self._design(features)
-        raw = self.model.predict(xgb.DMatrix(np.nan_to_num(X)))
+        dtest = xgb.DMatrix(np.nan_to_num(X, nan=0.0))
+
+        raw = np.mean([m.predict(dtest) for m in self.models], axis=0)
         pred = pd.DataFrame(raw.reshape(-1, len(tickers)), index=index, columns=tickers)
 
-        # Extended V8 trend filter -> cuts turnover drag & preserves V11's Global Novelty
         pred = pred.ewm(span=self.smooth_span, min_periods=1).mean()
         tilt = pred.shift(1).ewm(span=self.tilt_span, min_periods=1).mean()
         pred = (pred - tilt).fillna(0.0)
 
-        # Cross-sectional de-mean (no rank squashing -> keeps Concentration low & Sharpe up)
         pred = pred.sub(pred.mean(axis=1), axis=0).fillna(0.0)
-
-        # Cubic conviction scaling: suppresses tiny noisy weights near zero while
-        # letting high-conviction alpha signals drive portfolio PnL
         scale = pred.std(axis=1).replace(0.0, np.nan)
-        z = pred.div(scale, axis=0).fillna(0.0).clip(-3.0, 3.0)
-        conv = z * (z.abs() ** 0.5)
+        z = pred.div(scale, axis=0).fillna(0.0).clip(-2.5, 2.5)
+
+        # Gentle 0.25 conviction power: keeps V12's Sharpe boost while improving Compression Loss
+        conv = z * (z.abs() ** 0.25)
         return conv.sub(conv.mean(axis=1), axis=0).fillna(0.0)
