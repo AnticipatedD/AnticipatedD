@@ -19,7 +19,7 @@ warnings.filterwarnings("ignore")
 class MyPredictor(Predictor):
     def __init__(self):
         self.models = []
-        self.seeds = (43, 107, 193, 277)
+        self.seeds = (41, 103, 199)
         self.params = {
             "objective": "huber",
             "alpha": 0.015,
@@ -38,10 +38,10 @@ class MyPredictor(Predictor):
             "n_jobs": 4,
             "verbose": -1,
         }
-        self.ema1_span = 150
-        self.ema2_span = 95
-        self.slow_span = 1400
-        self.trade_band = 0.38
+        self.ema1_span = 520
+        self.ema2_span = 330
+        self.slow_span = 2900
+        self.trade_band = 0.40
 
     @staticmethod
     def _robust_tanh(df: pd.DataFrame) -> pd.DataFrame:
@@ -61,36 +61,36 @@ class MyPredictor(Predictor):
         t_feat = {i: self._robust_tanh(g.get(i)) for i in range(1, 7)}
         r = {i: self._csrank(g.get(i)) for i in range(1, 7)}
 
-        # Nonlinear MAD-copula ratios avoiding crowded d24/d21 linear spreads
-        energy = (t_feat.get(1).abs() + t_feat.get(3).abs() + t_feat.get(5).abs()) / 3.0
-        rat_31 = self._csrank((t_feat.get(3) - t_feat.get(1)) / (0.5 + energy))
-        rat_43 = self._csrank((t_feat.get(4) - t_feat.get(3)) / (0.5 + energy))
+        # Orthogonal MAD-copula ratios anchored on F1, F5, F6, F3 (zero rat_24 / rat_31 overlap)
+        energy = (t_feat.get(2).abs() + t_feat.get(5).abs() + t_feat.get(6).abs()) / 3.0
         rat_15 = self._csrank((t_feat.get(1) - t_feat.get(5)) / (0.5 + energy))
+        rat_63 = self._csrank((t_feat.get(6) - t_feat.get(3)) / (0.5 + energy))
+        rat_54 = self._csrank((t_feat.get(5) - t_feat.get(4)) / (0.5 + energy))
 
-        # Signed geometric interactions + Feature.6 medium-term velocity
-        v6_med = self._csrank(r.get(6) - r.get(6).ewm(span=36, min_periods=1).mean())
-        geom_316 = np.sign(t_feat.get(3) - t_feat.get(1)) * np.sqrt(
-            (t_feat.get(3) - t_feat.get(1)).abs() * r.get(6).abs()
+        # Signed geometric interactions + slow Feature.6 rank momentum
+        geom_156 = np.sign(t_feat.get(1) - t_feat.get(5)) * np.sqrt(
+            (t_feat.get(1) - t_feat.get(5)).abs() * r.get(6).abs()
         )
-        geom_435 = np.sign(t_feat.get(4) - t_feat.get(3)) * np.sqrt(
-            (t_feat.get(4) - t_feat.get(3)).abs() * r.get(5).abs()
+        geom_634 = np.sign(t_feat.get(6) - t_feat.get(3)) * np.sqrt(
+            (t_feat.get(6) - t_feat.get(3)).abs() * r.get(4).abs()
         )
+        v6_72 = self._csrank(r.get(6) - r.get(6).ewm(span=72, min_periods=1).mean())
 
         blocks = [
-            rat_31,
-            rat_43,
             rat_15,
-            v6_med,
-            geom_316,
-            geom_435,
-            t_feat.get(5) * t_feat.get(6),
-            r.get(6) - r.get(5),
+            rat_63,
+            rat_54,
+            geom_156,
+            geom_634,
+            v6_72,
+            t_feat.get(1) * t_feat.get(6),
+            t_feat.get(3) * t_feat.get(5),
             t_feat.get(6),
         ]
 
-        tickers = list(rat_31.columns)
+        tickers = list(rat_15.columns)
         X = np.hstack([b[tickers].values.reshape(-1, 1) for b in blocks])
-        return X, tickers, rat_31.index
+        return X, tickers, rat_15.index
 
     def train(self, features: pd.DataFrame, target: pd.DataFrame) -> None:
         X, tickers, _ = self._design(features)
@@ -120,7 +120,7 @@ class MyPredictor(Predictor):
         p = signal.sub(signal.mean(axis=1), axis=0).fillna(0.0)
         scale = p.std(axis=1).replace(0.0, np.nan)
         z = p.div(scale, axis=0).fillna(0.0).clip(-3.0, 3.0)
-        target_pos = np.sign(z) * (z.abs() ** 1.40)
+        target_pos = np.sign(z) * (z.abs() ** 1.38)
         target_pos = target_pos.sub(target_pos.mean(axis=1), axis=0).fillna(0.0)
 
         arr = target_pos.values
