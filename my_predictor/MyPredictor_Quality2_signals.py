@@ -10,7 +10,7 @@ warnings.filterwarnings("ignore")
 class MyPredictor(Predictor):
     def __init__(self):
         self.models = []
-        self.seeds = (23, 67, 149)
+        self.seeds = (41, 103, 199)
         self.params = {
             "objective": "reg:pseudohubererror",
             "huber_slope": 0.015,
@@ -19,16 +19,16 @@ class MyPredictor(Predictor):
             "subsample": 0.75,
             "colsample_bytree": 0.70,
             "min_child_weight": 950,
-            "reg_lambda": 24.0,
+            "reg_lambda": 22.0,
             "reg_alpha": 2.0,
             "verbosity": 0,
             "nthread": 4,
         }
         self.n_rounds = 28
-        self.ema1_span = 520
-        self.ema2_span = 340
-        self.slow_span = 2800
-        self.trade_band = 0.32
+        self.ema1_span = 280
+        self.ema2_span = 180
+        self.slow_span = 2200
+        self.trade_band = 0.25
 
     @staticmethod
     def _csrank(df: pd.DataFrame) -> pd.DataFrame:
@@ -54,28 +54,25 @@ class MyPredictor(Predictor):
         r = {i: self._csrank(g.get(i)) for i in range(1, 7)}
         z = {i: self._csz(g.get(i)) for i in range(1, 7)}
 
-        # Orthogonal subspace anchored on Feature.3, Feature.4, and Feature.5
+        # Orthogonal subspace anchored on Feature.3, Feature.4, and Feature.5 (zero d24/d21 overlap)
         d34 = g.get(3) - g.get(4)
         s34 = self._csrank(d34)
-        s41 = self._csrank(self._orthogonalize(g.get(4) - g.get(1), d34))
-        s32 = self._csrank(self._orthogonalize(g.get(3) - g.get(2), d34))
+        s35 = self._csrank(self._orthogonalize(g.get(3) - g.get(5), d34))
+        s45 = self._csrank(self._orthogonalize(g.get(4) - g.get(5), d34))
 
-        # True raw cross-sectional dispersion on F3/F4/F5
-        raw_disp = (g.get(3).std(axis=1) + g.get(4).std(axis=1) + g.get(5).std(axis=1)) / 3.0
-        disp_ratio = (
-            raw_disp / raw_disp.ewm(span=300, min_periods=1).mean().replace(0.0, np.nan)
-        ).fillna(1.0).clip(0.5, 2.0)
+        # Multi-feature rank velocities (proven novelty + IC driver without disp_ratio distortion)
+        r5_vel = self._csrank(r.get(5) - r.get(5).ewm(span=36, min_periods=1).mean())
+        r3_vel = self._csrank(r.get(3) - r.get(3).ewm(span=48, min_periods=1).mean())
 
         return {
             "s34": s34,
-            "s41": s41,
-            "s32": s32,
+            "s35": s35,
+            "s45": s45,
+            "r5_vel": r5_vel,
+            "r3_vel": r3_vel,
             "i34_5": (r.get(3) - r.get(4)) * r.get(5),
-            "i41_6": (r.get(4) - r.get(1)) * r.get(6),
+            "i35_6": (r.get(3) - r.get(5)) * r.get(6),
             "quad_35": np.tanh(z.get(3) * z.get(5)),
-            "quad_45": np.tanh(z.get(4) * z.get(5)),
-            "disp_s34": s34.mul(disp_ratio, axis=0),
-            "r4": r.get(4),
             "r5": r.get(5),
         }
 
@@ -106,6 +103,7 @@ class MyPredictor(Predictor):
         raw = np.mean([m.predict(dtest) for m in self.models], axis=0)
         pred = pd.DataFrame(raw.reshape(-1, len(tickers)), index=index, columns=tickers)
 
+        # Exact [★ Q15] low-pass & hysteresis parameters (0.0084 Sharpe / -0.0045 IC Disp)
         lp1 = pred.ewm(span=self.ema1_span, min_periods=1).mean()
         lp2 = lp1.ewm(span=self.ema2_span, min_periods=1).mean()
         slow = lp2.shift(1).ewm(span=self.slow_span, min_periods=1).mean()
@@ -121,8 +119,8 @@ class MyPredictor(Predictor):
         n_rows, _ = arr.shape
         held = np.zeros_like(arr)
         if n_rows > 0:
-            curr = arr[0].copy()
-            held[0] = curr
+            curr = arr.copy()
+            held = curr
             band = self.trade_band
             for t in range(1, n_rows):
                 diff = arr[t] - curr
