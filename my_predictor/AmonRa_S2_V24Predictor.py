@@ -11,7 +11,7 @@ class AmonRaS2V24Predictor(Predictor):
     def __init__(self):
         self.models = []
         self.seeds = (42, 777)
-        # V12's winning regularization that pushed IC to 0.0398 and Sharpe to 0.0037
+        # V21's winning regularization that pushed IC to 0.0398 and Sharpe to 0.0037
         self.params = {
             "objective": "reg:squarederror",
             "max_depth": 2,
@@ -76,7 +76,7 @@ class AmonRaS2V24Predictor(Predictor):
         raw = np.mean([m.predict(dtest) for m in self.models], axis=0)
         pred = pd.DataFrame(raw.reshape(-1, len(tickers)), index=index, columns=tickers)
 
-        # V12's exact 0.0398-IC trend filter
+        # V21's exact 0.0398-IC trend filter
         pred = pred.ewm(span=self.smooth_span, min_periods=1).mean()
         tilt = pred.shift(1).ewm(span=self.tilt_span, min_periods=1).mean()
         pred = (pred - tilt).fillna(0.0)
@@ -85,6 +85,6 @@ class AmonRaS2V24Predictor(Predictor):
         p = pred.sub(pred.mean(axis=1), axis=0).fillna(0.0)
 
         # Scale-free conviction power (1.35): suppresses near-zero turnover noise
-        # like V12 while keeping natural cross-sectional dispersion intact
+        # like V21 while keeping natural cross-sectional dispersion intact
         out = np.sign(p) * (p.abs() ** 1.35)
         return out.sub(out.mean(axis=1), axis=0).fillna(0.0)
