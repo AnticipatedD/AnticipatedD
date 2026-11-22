@@ -38,10 +38,10 @@ class MyPredictor(Predictor):
             "n_jobs": 4,
             "verbose": -1,
         }
-        self.ema1_span = 340
-        self.ema2_span = 210
-        self.slow_span = 2400
-        self.trade_band = 0.34
+        self.ema1_span = 480
+        self.ema2_span = 300
+        self.slow_span = 2600
+        self.trade_band = 0.42
 
     @staticmethod
     def _csrank(df: pd.DataFrame) -> pd.DataFrame:
@@ -127,7 +127,7 @@ class MyPredictor(Predictor):
         target_pos = np.sign(z) * (z.abs() ** 1.35)
         target_pos = target_pos.sub(target_pos.mean(axis=1), axis=0).fillna(0.0)
 
-        # Causal Hysteresis deadband (0.34) cuts remaining 5 bp turnover cost
+        # Causal Hysteresis deadband (0.42) cuts remaining 5 bp turnover cost
         arr = target_pos.values
         n_rows, _ = arr.shape
         held = np.zeros_like(arr)
@@ -137,7 +137,8 @@ class MyPredictor(Predictor):
             band = self.trade_band
             for t in range(1, n_rows):
                 diff = arr[t] - curr
-                curr = curr + np.sign(diff) * np.maximum(np.abs(diff) - band, 0.0)
+                move = np.sign(diff) * np.maximum(np.abs(diff) - band, 0.0)
+                curr = curr + move
                 held[t] = curr
 
         out = pd.DataFrame(held, index=index, columns=tickers)
