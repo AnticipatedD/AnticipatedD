@@ -19,7 +19,7 @@ warnings.filterwarnings("ignore")
 class MyPredictor(Predictor):
     def __init__(self):
         self.models = []
-        self.seeds = (17, 59, 131, 211)
+        self.seeds = (31, 89, 173)
         self.params = {
             "objective": "huber",
             "alpha": 0.015,
@@ -34,14 +34,21 @@ class MyPredictor(Predictor):
             "min_child_samples": 950,
             "reg_alpha": 2.0,
             "reg_lambda": 22.0,
-            "n_estimators": 45,
+            "n_estimators": 42,
             "n_jobs": 4,
             "verbose": -1,
         }
-        self.ema1_span = 480
-        self.ema2_span = 300
-        self.slow_span = 2600
-        self.trade_band = 0.42
+        self.ema1_span = 190
+        self.ema2_span = 120
+        self.slow_span = 1600
+        self.trade_band = 0.36
+
+    @staticmethod
+    def _robust_tanh(df: pd.DataFrame) -> pd.DataFrame:
+        med = df.median(axis=1)
+        mad = (df.sub(med, axis=0)).abs().median(axis=1).replace(0.0, np.nan)
+        z = df.sub(med, axis=0).div(1.4826 * mad, axis=0).fillna(0.0)
+        return np.tanh(0.70 * z)
 
     @staticmethod
     def _csrank(df: pd.DataFrame) -> pd.DataFrame:
@@ -49,50 +56,40 @@ class MyPredictor(Predictor):
         n = df.notna().sum(axis=1).values.reshape(-1, 1)
         return (r - 0.5 * (n + 1.0)) / (0.5 * np.maximum(n - 1.0, 1.0))
 
-    @staticmethod
-    def _csz(df: pd.DataFrame) -> pd.DataFrame:
-        m = df.mean(axis=1)
-        s = df.std(axis=1).replace(0.0, np.nan)
-        return df.sub(m, axis=0).div(s, axis=0).fillna(0.0).clip(-3.5, 3.5)
-
-    @staticmethod
-    def _orthogonalize(target_df: pd.DataFrame, basis_df: pd.DataFrame) -> pd.DataFrame:
-        num = (target_df * basis_df).sum(axis=1)
-        den = (basis_df * basis_df).sum(axis=1).replace(0.0, np.nan)
-        beta = (num / den).fillna(0.0)
-        return target_df.sub(basis_df.mul(beta, axis=0), axis=0)
-
     def _design(self, features: pd.DataFrame):
         g = {i: features[f"Feature.{i}"] for i in range(1, 7)}
+        t_feat = {i: self._robust_tanh(g.get(i)) for i in range(1, 7)}
         r = {i: self._csrank(g.get(i)) for i in range(1, 7)}
-        z = {i: self._csz(g.get(i)) for i in range(1, 7)}
 
-        d24 = g.get(2) - g.get(4)
-        s24 = self._csrank(d24)
-        s12 = self._csrank(self._orthogonalize(g.get(1) - g.get(2), d24))
-        s13 = self._csrank(self._orthogonalize(g.get(1) - g.get(3), d24))
+        # Nonlinear MAD-copula ratios & asymmetric cross-feature products
+        energy = (t_feat.get(1).abs() + t_feat.get(3).abs() + t_feat.get(4).abs()) / 3.0
+        rat_24 = self._csrank((t_feat.get(2) - t_feat.get(4)) / (0.5 + energy))
+        rat_31 = self._csrank((t_feat.get(3) - t_feat.get(1)) / (0.5 + energy))
+        rat_42 = self._csrank((t_feat.get(4) - t_feat.get(2)) / (0.5 + energy))
 
-        raw_disp = (g.get(1).std(axis=1) + g.get(2).std(axis=1) + g.get(4).std(axis=1)) / 3.0
-        disp_ratio = (
-            raw_disp / raw_disp.ewm(span=240, min_periods=1).mean().replace(0.0, np.nan)
-        ).fillna(1.0).clip(0.5, 2.0)
+        # Signed geometric interactions
+        geom_246 = np.sign(t_feat.get(2) - t_feat.get(4)) * np.sqrt(
+            (t_feat.get(2) - t_feat.get(4)).abs() * r.get(6).abs()
+        )
+        geom_315 = np.sign(t_feat.get(3) - t_feat.get(1)) * np.sqrt(
+            (t_feat.get(3) - t_feat.get(1)).abs() * r.get(5).abs()
+        )
 
         blocks = [
-            s24,
-            s12,
-            s13,
-            (r.get(2) - r.get(3)) * r.get(6),
-            (r.get(2) - r.get(4)) * r.get(5),
-            (r.get(1) - r.get(4)) * r.get(6),
-            np.tanh(z.get(5) * z.get(6)),
-            s24.mul(disp_ratio, axis=0),
-            r.get(5),
-            r.get(6),
+            rat_24,
+            rat_31,
+            rat_42,
+            geom_246,
+            geom_315,
+            t_feat.get(5) * t_feat.get(6),
+            t_feat.get(2) * t_feat.get(6),
+            r.get(6) - r.get(5),
+            t_feat.get(6),
         ]
 
-        tickers = list(s24.columns)
+        tickers = list(rat_24.columns)
         X = np.hstack([b[tickers].values.reshape(-1, 1) for b in blocks])
-        return X, tickers, s24.index
+        return X, tickers, rat_24.index
 
     def train(self, features: pd.DataFrame, target: pd.DataFrame) -> None:
         X, tickers, _ = self._design(features)
@@ -114,20 +111,17 @@ class MyPredictor(Predictor):
         raw = np.mean([m.predict(X_clean) for m in self.models], axis=0)
         pred = pd.DataFrame(raw.reshape(-1, len(tickers)), index=index, columns=tickers)
 
-        # Second-order causal low-pass filter + full baseline removal
         lp1 = pred.ewm(span=self.ema1_span, min_periods=1).mean()
         lp2 = lp1.ewm(span=self.ema2_span, min_periods=1).mean()
         slow = lp2.shift(1).ewm(span=self.slow_span, min_periods=1).mean()
         signal = (lp2 - slow).fillna(0.0)
 
-        # Unit-variance risk stabilization + 1.35 conviction power
         p = signal.sub(signal.mean(axis=1), axis=0).fillna(0.0)
         scale = p.std(axis=1).replace(0.0, np.nan)
         z = p.div(scale, axis=0).fillna(0.0).clip(-3.0, 3.0)
         target_pos = np.sign(z) * (z.abs() ** 1.35)
         target_pos = target_pos.sub(target_pos.mean(axis=1), axis=0).fillna(0.0)
 
-        # Causal Hysteresis deadband (0.42) cuts remaining 5 bp turnover cost
         arr = target_pos.values
         n_rows, _ = arr.shape
         held = np.zeros_like(arr)
