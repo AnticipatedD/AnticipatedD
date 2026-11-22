@@ -54,13 +54,11 @@ class MyPredictor(Predictor):
         r = {i: self._csrank(g.get(i)) for i in range(1, 7)}
         z = {i: self._csz(g.get(i)) for i in range(1, 7)}
 
-        # Proven 0.0424-IC orthogonalized cross-sectional spreads
         d24 = g.get(2) - g.get(4)
         s24 = self._csrank(d24)
         s12 = self._csrank(self._orthogonalize(g.get(1) - g.get(2), d24))
         s13 = self._csrank(self._orthogonalize(g.get(1) - g.get(3), d24))
 
-        # True raw cross-sectional dispersion (fixes z.std() == 1 constant bug)
         raw_disp = (g.get(1).std(axis=1) + g.get(2).std(axis=1) + g.get(4).std(axis=1)) / 3.0
         disp_ratio = (
             raw_disp / raw_disp.ewm(span=240, min_periods=1).mean().replace(0.0, np.nan)
@@ -124,8 +122,8 @@ class MyPredictor(Predictor):
         n_rows, _ = arr.shape
         held = np.zeros_like(arr)
         if n_rows > 0:
-            curr = arr.copy()
-            held = curr
+            curr = arr[0].copy()
+            held[0] = curr
             band = self.trade_band
             for t in range(1, n_rows):
                 diff = arr[t] - curr
