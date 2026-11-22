@@ -1,167 +1,105 @@
-# /// script
-# dependencies = [
-#     "numpy",
-#     "pandas",
-#     "scikit-learn",
-# ]
-# ///
+import warnings
 import numpy as np
 import pandas as pd
-from sklearn.linear_model import Ridge
+import xgboost as xgb
 from predictor import Predictor
 
-class MyPredictor(Predictor):
-    """
-    Stateless market-neutral ridge on cross-sectional z-scores + momentum.
-    Guarantees every row sums to zero.
-    """
-    def __init__(self, alpha: float = 1.0, epsilon: float = 1e-8):
-        self.alpha = alpha
-        self.epsilon = epsilon
-        self.feature_names = []
-        self.is_trained = False
-        self.model = Ridge(alpha=alpha, fit_intercept=True)
-        self.optimal_concentration = 1.0
-        self.target_bound = 0.15
+warnings.filterwarnings("ignore")
 
-    def _engineer_features(self, features_df: pd.DataFrame) -> np.ndarray:
-        if features_df is None or features_df.empty:
-            return np.zeros((0, 0, 1), dtype=np.float64)
 
-        if not self.feature_names:
-            self.feature_names = list(features_df.columns.get_level_values(0).unique())
+class AmonRa_S2_V29Predictor(Predictor):
+    def __init__(self):
+        self.models = []
+        self.seeds = (11, 29, 53)
+        self.params = {
+            "objective": "reg:pseudohubererror",
+            "huber_slope": 0.015,
+            "max_depth": 2,
+            "eta": 0.03,
+            "subsample": 0.75,
+            "colsample_bytree": 0.70,
+            "min_child_weight": 950,
+            "reg_lambda": 20.0,
+            "reg_alpha": 1.5,
+            "verbosity": 0,
+            "nthread": 4,
+        }
+        self.n_rounds = 28
+        self.ema1_span = 360
+        self.ema2_span = 240
+        self.slow_span = 2400
 
-        tickers = features_df.columns.get_level_values(1).unique()
-        N_time = len(features_df)
-        J_assets = len(tickers)
-        feature_matrices = []
+    @staticmethod
+    def _csrank(df: pd.DataFrame) -> pd.DataFrame:
+        r = df.rank(axis=1, method="average")
+        n = df.notna().sum(axis=1).values.reshape(-1, 1)
+        return (r - 0.5 * (n + 1.0)) / (0.5 * np.maximum(n - 1.0, 1.0))
 
-        for feat in self.feature_names:
-            try:
-                raw = features_df[feat].astype(np.float64).to_numpy()
-            except Exception:
-                raw = np.zeros((N_time, J_assets), dtype=np.float64)
+    @staticmethod
+    def _orthogonalize(target_df: pd.DataFrame, basis_df: pd.DataFrame) -> pd.DataFrame:
+        num = (target_df * basis_df).sum(axis=1)
+        den = (basis_df * basis_df).sum(axis=1).replace(0.0, np.nan)
+        beta = (num / den).fillna(0.0)
+        return target_df.sub(basis_df.mul(beta, axis=0), axis=0)
 
-            # Cross-sectional z-score
-            row_mean = np.nanmean(raw, axis=1, keepdims=True)
-            row_std = np.nanstd(raw, axis=1, keepdims=True)
-            row_std = np.where(row_std < self.epsilon, self.epsilon, row_std)
-            z = (raw - row_mean) / row_std
-            z = np.nan_to_num(z, nan=0.0, posinf=0.0, neginf=0.0)
-            z = np.clip(z, -3.0, 3.0)
-            feature_matrices.append(z)
+    def _blocks(self, features: pd.DataFrame) -> dict[str, pd.DataFrame]:
+        g = {i: features[f"Feature.{i}"] for i in range(1, 7)}
+        r = {i: self._csrank(g.get(i)) for i in range(1, 7)}
 
-            # Lag-1 momentum
-            mom = np.zeros_like(raw)
-            if N_time > 1:
-                mom[1:] = raw[1:] - raw[:-1]
-            mom = np.nan_to_num(mom, nan=0.0, posinf=0.0, neginf=0.0)
-            feature_matrices.append(mom)
+        s24 = self._csrank(g.get(2) - g.get(4))
+        s12 = self._csrank(self._orthogonalize(g.get(1) - g.get(2), g.get(2) - g.get(4)))
+        s13 = self._csrank(self._orthogonalize(g.get(1) - g.get(3), g.get(2) - g.get(4)))
 
-        if not feature_matrices:
-            return np.zeros((N_time, J_assets, 1), dtype=np.float64)
+        return {
+            "s24": s24,
+            "s12": s12,
+            "s13": s13,
+            "i23_6": (r.get(2) - r.get(3)) * r.get(6),
+            "i24_5": (r.get(2) - r.get(4)) * r.get(5),
+            "i14_6": (r.get(1) - r.get(4)) * r.get(6),
+            "p56": r.get(5) * r.get(6),
+            "r5": r.get(5),
+            "r6": r.get(6),
+        }
 
-        return np.stack(feature_matrices, axis=-1)
+    def _design(self, features: pd.DataFrame):
+        b = self._blocks(features)
+        tickers = list(b["s24"].columns)
+        X = np.hstack([d[tickers].values.reshape(-1, 1) for d in b.values()])
+        return X, tickers, b["s24"].index
 
     def train(self, features: pd.DataFrame, target: pd.DataFrame) -> None:
-        if features is None or features.empty or target is None or target.empty:
-            self.is_trained = False
-            return
+        X, tickers, _ = self._design(features)
+        y = target[tickers].values.reshape(-1)
+        ok = np.isfinite(y) & np.isfinite(X).all(axis=1)
 
-        self.feature_names = list(features.columns.get_level_values(0).unique())
-
-        features_sorted = features.sort_index(ascending=True)
-        target_sorted = target.sort_index(ascending=True)
-
-        common_idx = features_sorted.index.intersection(target_sorted.index)
-        if len(common_idx) == 0:
-            self.is_trained = False
-            return
-
-        features_sorted = features_sorted.loc[common_idx]
-        target_sorted = target_sorted.loc[common_idx]
-
-        X_tensor = self._engineer_features(features_sorted)
-        y_matrix = target_sorted.astype(np.float64).fillna(0.0).to_numpy()
-
-        if X_tensor.size == 0 or y_matrix.size == 0:
-            self.is_trained = False
-            return
-
-        N_time, J_assets, N_feats = X_tensor.shape
-        X_flat = X_tensor.reshape(-1, N_feats)
-        y_flat = y_matrix.reshape(-1)
-
-        mask = np.isfinite(X_flat).all(axis=1) & np.isfinite(y_flat)
-        if mask.sum() < 10:
-            self.is_trained = False
-            return
-
-        self.model.fit(X_flat[mask], y_flat[mask])
-        self.is_trained = True
-
-    def predict(self, features: pd.DataFrame) -> pd.DataFrame:
-        if features is None or features.empty:
-            return pd.DataFrame()
-
-        features_sorted = features.sort_index(ascending=True)
-        tickers = features_sorted.columns.get_level_values(1).unique()
-        zero_signal = pd.DataFrame(
-            0.0, index=features_sorted.index, columns=tickers, dtype=np.float32
-        )
-
-        try:
-            X_tensor = self._engineer_features(features_sorted)
-            if X_tensor.size == 0:
-                return zero_signal
-
-            N_time, J_assets, N_feats = X_tensor.shape
-
-            if self.is_trained and hasattr(self.model, "coef_"):
-                X_flat = X_tensor.reshape(-1, N_feats)
-                raw_preds = self.model.predict(X_flat)
-                alpha_raw = raw_preds.reshape(N_time, J_assets)
-            else:
-                alpha_raw = X_tensor[..., 0] * 0.05
-
-            # Market-neutral demean
-            alpha_demeaned = alpha_raw - np.nanmean(alpha_raw, axis=1, keepdims=True)
-            alpha_demeaned = np.nan_to_num(alpha_demeaned, nan=0.0)
-
-            # L2 normalize + scale
-            row_norms = np.linalg.norm(alpha_demeaned, axis=1, keepdims=True)
-            row_norms = np.where(row_norms < self.epsilon, self.epsilon, row_norms)
-            target_signals = (alpha_demeaned / row_norms) * self.optimal_concentration
-
-            # Intra-batch exponential smoothing (stateless)
-            decay = 0.65
-            smoothed = np.zeros_like(target_signals)
-            prev = np.zeros(J_assets, dtype=np.float64)
-            for t in range(N_time):
-                curr = decay * target_signals[t] + (1.0 - decay) * prev
-                curr = curr - curr.mean()          # keep neutral
-                smoothed[t] = curr
-                prev = curr
-
-            final_df = pd.DataFrame(
-                smoothed, index=features_sorted.index, columns=tickers
+        dtrain = xgb.DMatrix(X[ok], label=y[ok])
+        self.models = []
+        for s in self.seeds:
+            p = dict(self.params, seed=s)
+            self.models.append(
+                xgb.train(p, dtrain, num_boost_round=self.n_rounds)
             )
 
-            # Clip (this breaks neutrality)
-            final_df = final_df.clip(-self.target_bound, self.target_bound)
+    def predict(self, features: pd.DataFrame) -> pd.DataFrame:
+        assert len(self.models) > 0
+        X, tickers, index = self._design(features)
+        dtest = xgb.DMatrix(np.nan_to_num(X, nan=0.0))
 
-            # Re-demean after clip
-            final_df = final_df.sub(final_df.mean(axis=1), axis=0)
+        raw = np.mean([m.predict(dtest) for m in self.models], axis=0)
+        pred = pd.DataFrame(raw.reshape(-1, len(tickers)), index=index, columns=tickers)
 
-            # Align to original call
-            final_df = final_df.reindex(index=features.index, columns=tickers).fillna(0.0)
+        # Second-order causal low-pass filter to slash 5 bp hourly turnover drag
+        lp1 = pred.ewm(span=self.ema1_span, min_periods=1).mean()
+        lp2 = lp1.ewm(span=self.ema2_span, min_periods=1).mean()
+        slow = lp2.shift(1).ewm(span=self.slow_span, min_periods=1).mean()
+        signal = (lp2 - slow).fillna(0.0)
 
-            # Final hard demean – mandatory for the platform check
-            final_df = final_df.sub(final_df.mean(axis=1), axis=0)
+        # Cross-sectional de-mean + unit-variance stabilization on `signal`
+        p = signal.sub(signal.mean(axis=1), axis=0).fillna(0.0)
+        scale = p.std(axis=1).replace(0.0, np.nan)
+        z = p.div(scale, axis=0).fillna(0.0).clip(-3.0, 3.0)
 
-            return final_df.astype(np.float32)
-
-        except Exception:
-            return zero_signal.reindex(index=features.index).fillna(0.0).astype(np.float32)
-
-predictor = MyPredictor()
+        # 1.35 conviction power balances tail Sharpe boost vs. turnover & Compression Loss
+        conv = np.sign(z) * (z.abs() ** 1.35)
+        return conv.sub(conv.mean(axis=1), axis=0).fillna(0.0)
