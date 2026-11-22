@@ -10,25 +10,25 @@ warnings.filterwarnings("ignore")
 class MyPredictor(Predictor):
     def __init__(self):
         self.models = []
-        self.seeds = (41, 103, 199)
+        self.seeds = (29, 71, 137)
         self.params = {
             "objective": "reg:pseudohubererror",
             "huber_slope": 0.015,
             "max_depth": 2,
             "eta": 0.03,
-            "subsample": 0.75,
+            "subsample": 0.72,
             "colsample_bytree": 0.70,
-            "min_child_weight": 950,
-            "reg_lambda": 22.0,
-            "reg_alpha": 2.0,
+            "min_child_weight": 1150,
+            "reg_lambda": 26.0,
+            "reg_alpha": 2.5,
             "verbosity": 0,
             "nthread": 4,
         }
-        self.n_rounds = 28
-        self.ema1_span = 280
-        self.ema2_span = 180
-        self.slow_span = 2200
-        self.trade_band = 0.25
+        self.n_rounds = 24
+        self.ema1_span = 460
+        self.ema2_span = 290
+        self.slow_span = 2800
+        self.trade_band = 0.30
 
     @staticmethod
     def _csrank(df: pd.DataFrame) -> pd.DataFrame:
@@ -54,33 +54,34 @@ class MyPredictor(Predictor):
         r = {i: self._csrank(g.get(i)) for i in range(1, 7)}
         z = {i: self._csz(g.get(i)) for i in range(1, 7)}
 
-        # Orthogonal subspace anchored on Feature.3, Feature.4, and Feature.5 (zero d24/d21 overlap)
-        d34 = g.get(3) - g.get(4)
-        s34 = self._csrank(d34)
-        s35 = self._csrank(self._orthogonalize(g.get(3) - g.get(5), d34))
-        s45 = self._csrank(self._orthogonalize(g.get(4) - g.get(5), d34))
+        # Orthogonal cross-feature basis using strong alpha drivers (F1, F3, F4, F6)
+        # without duplicating [★ Q15]'s d21/d24 primary axes
+        d14 = g.get(1) - g.get(4)
+        s14 = self._csrank(d14)
+        s32 = self._csrank(self._orthogonalize(g.get(3) - g.get(2), d14))
+        s65 = self._csrank(self._orthogonalize(g.get(6) - g.get(5), d14))
 
-        # Multi-feature rank velocities (proven novelty + IC driver without disp_ratio distortion)
-        r5_vel = self._csrank(r.get(5) - r.get(5).ewm(span=36, min_periods=1).mean())
-        r3_vel = self._csrank(r.get(3) - r.get(3).ewm(span=48, min_periods=1).mean())
+        # Multi-horizon Feature.6 & Feature.1 velocity
+        r6_vel = self._csrank(r.get(6) - r.get(6).ewm(span=48, min_periods=1).mean())
+        r1_vel = self._csrank(r.get(1) - r.get(1).ewm(span=36, min_periods=1).mean())
 
         return {
-            "s34": s34,
-            "s35": s35,
-            "s45": s45,
-            "r5_vel": r5_vel,
-            "r3_vel": r3_vel,
-            "i34_5": (r.get(3) - r.get(4)) * r.get(5),
-            "i35_6": (r.get(3) - r.get(5)) * r.get(6),
-            "quad_35": np.tanh(z.get(3) * z.get(5)),
-            "r5": r.get(5),
+            "s14": s14,
+            "s32": s32,
+            "s65": s65,
+            "r6_vel": r6_vel,
+            "r1_vel": r1_vel,
+            "i14_6": (r.get(1) - r.get(4)) * r.get(6),
+            "i32_5": (r.get(3) - r.get(2)) * r.get(5),
+            "quad_16": np.tanh(z.get(1) * z.get(6)),
+            "r6": r.get(6),
         }
 
     def _design(self, features: pd.DataFrame):
         b = self._blocks(features)
-        tickers = list(b["s34"].columns)
+        tickers = list(b["s14"].columns)
         X = np.hstack([d[tickers].values.reshape(-1, 1) for d in b.values()])
-        return X, tickers, b["s34"].index
+        return X, tickers, b["s14"].index
 
     def train(self, features: pd.DataFrame, target: pd.DataFrame) -> None:
         X, tickers, _ = self._design(features)
@@ -103,7 +104,6 @@ class MyPredictor(Predictor):
         raw = np.mean([m.predict(dtest) for m in self.models], axis=0)
         pred = pd.DataFrame(raw.reshape(-1, len(tickers)), index=index, columns=tickers)
 
-        # Exact [★ Q15] low-pass & hysteresis parameters (0.0084 Sharpe / -0.0045 IC Disp)
         lp1 = pred.ewm(span=self.ema1_span, min_periods=1).mean()
         lp2 = lp1.ewm(span=self.ema2_span, min_periods=1).mean()
         slow = lp2.shift(1).ewm(span=self.slow_span, min_periods=1).mean()
@@ -119,8 +119,8 @@ class MyPredictor(Predictor):
         n_rows, _ = arr.shape
         held = np.zeros_like(arr)
         if n_rows > 0:
-            curr = arr.copy()
-            held = curr
+            curr = arr[0].copy()
+            held[0] = curr
             band = self.trade_band
             for t in range(1, n_rows):
                 diff = arr[t] - curr
