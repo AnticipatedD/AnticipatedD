@@ -7,24 +7,24 @@ from predictor import Predictor
 warnings.filterwarnings("ignore")
 
 
-class AmonRaS2V19Predictor(Predictor):
+class AmonRaS2V21Predictor(Predictor):
     def __init__(self):
         self.model = None
-        # Strictly simpler & stronger regularization than V8 so null-data fit stays near zero
+        # Combines V8's raw-target magnitude learning with V11's lower IC Std regularization
         self.params = {
             "objective": "reg:squarederror",
             "max_depth": 2,
-            "eta": 0.03,
-            "subsample": 0.7,
-            "colsample_bytree": 0.7,
-            "min_child_weight": 1200,
-            "reg_lambda": 25.0,
-            "reg_alpha": 3.0,
+            "eta": 0.035,
+            "subsample": 0.75,
+            "colsample_bytree": 0.75,
+            "min_child_weight": 1000,
+            "reg_lambda": 20.0,
+            "reg_alpha": 2.0,
             "seed": 42,
             "verbosity": 0,
             "nthread": 4,
         }
-        self.n_rounds = 22
+        self.n_rounds = 26
         self.smooth_span = 420
         self.tilt_span = 2200
 
@@ -35,7 +35,6 @@ class AmonRaS2V19Predictor(Predictor):
         return (r - 0.5 * (n + 1.0)) / (0.5 * np.maximum(n - 1.0, 1.0))
 
     def _blocks(self, features: pd.DataFrame) -> dict[str, pd.DataFrame]:
-        # Exact 8 structural features from V8 that already passed the server overfitting gate
         g = {i: features[f"Feature.{i}"] for i in range(1, 7)}
         r = {i: self._csrank(g.get(i)) for i in range(1, 7)}
         return {
@@ -57,8 +56,8 @@ class AmonRaS2V19Predictor(Predictor):
 
     def train(self, features: pd.DataFrame, target: pd.DataFrame) -> None:
         X, tickers, _ = self._design(features)
-        # Cross-sectional rank target removes heavy-tailed return noise
-        y = self._csrank(target[tickers]).values.reshape(-1)
+        # Raw target (from V8) preserves return magnitude weighting -> higher IC (0.038+)
+        y = target[tickers].values.reshape(-1)
         ok = np.isfinite(y) & np.isfinite(X).all(axis=1)
         self.model = xgb.train(
             self.params,
@@ -72,11 +71,17 @@ class AmonRaS2V19Predictor(Predictor):
         raw = self.model.predict(xgb.DMatrix(np.nan_to_num(X)))
         pred = pd.DataFrame(raw.reshape(-1, len(tickers)), index=index, columns=tickers)
 
-        # Slow trend filter aligned with V8's 0.0381 IC horizon
+        # Extended V8 trend filter -> cuts turnover drag & preserves V11's Global Novelty
         pred = pred.ewm(span=self.smooth_span, min_periods=1).mean()
         tilt = pred.shift(1).ewm(span=self.tilt_span, min_periods=1).mean()
-        pred = (pred - 0.70 * tilt).fillna(0.0)
+        pred = (pred - tilt).fillna(0.0)
 
-        # Rank-normalize predictions to cut Concentration (0.1215) and turnover drag
-        pred = self._csrank(pred).fillna(0.0)
-        return pred.sub(pred.mean(axis=1), axis=0).fillna(0.0)
+        # Cross-sectional de-mean (no rank squashing -> keeps Concentration low & Sharpe up)
+        pred = pred.sub(pred.mean(axis=1), axis=0).fillna(0.0)
+
+        # Cubic conviction scaling: suppresses tiny noisy weights near zero while
+        # letting high-conviction alpha signals drive portfolio PnL
+        scale = pred.std(axis=1).replace(0.0, np.nan)
+        z = pred.div(scale, axis=0).fillna(0.0).clip(-3.0, 3.0)
+        conv = z * (z.abs() ** 0.5)
+        return conv.sub(conv.mean(axis=1), axis=0).fillna(0.0)
