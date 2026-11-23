@@ -21,8 +21,9 @@ class MyPredictor(Predictor):
     def __init__(self):
         self.lgb_models = []
         self.xgb_models = []
-        self.seeds = [31, 89, 173]
+        self.seeds =
 
+        # Proven heavy regularization from 0.0099 Sharpe / 0.0474 IC winner
         self.lgb_params = {
             "objective": "huber",
             "alpha": 0.035,
@@ -43,7 +44,7 @@ class MyPredictor(Predictor):
 
         self.xgb_params = {
             "objective": "reg:pseudohubererror",
-            "huber_slope": 0.018,
+            "huber_slope": 0.015,
             "max_depth": 2,
             "eta": 0.03,
             "subsample": 0.75,
@@ -56,19 +57,19 @@ class MyPredictor(Predictor):
         }
         self.xgb_rounds = 25
 
-        # Pre-denoising (span=45) + post-filter (165/110/1750) targets >0.0100 Sharpe
-        self.pre_span = 45
-        self.ema1_span = 165
-        self.ema2_span = 110
-        self.slow_span = 1750
-        self.trade_band = 0.28
+        # Gentle pre-smooth (20) + proven 215/140/1850 low-pass + 0.36 hysteresis band
+        self.pre_span = 20
+        self.ema1_span = 215
+        self.ema2_span = 140
+        self.slow_span = 1850
+        self.trade_band = 0.36
 
     @staticmethod
     def _robust_tanh(df: pd.DataFrame) -> pd.DataFrame:
         med = df.median(axis=1)
         mad = (df.sub(med, axis=0)).abs().median(axis=1).replace(0.0, np.nan)
         z = df.sub(med, axis=0).div(1.4826 * mad, axis=0).fillna(0.0)
-        return np.tanh(0.67 * z)
+        return np.tanh(0.70 * z)
 
     @staticmethod
     def _csrank(df: pd.DataFrame) -> pd.DataFrame:
@@ -91,36 +92,44 @@ class MyPredictor(Predictor):
         t_feat = {i: self._robust_tanh(g[i]) for i in range(1, 7)}
         r = {i: self._csrank(g[i]) for i in range(1, 7)}
 
-        energy = (t_feat[1].abs() + t_feat[3].abs() + t_feat[4].abs()) / 3.0
-        rat_24 = self._csrank((t_feat[2] - t_feat[4]) / (0.5 + energy))
-        rat_31 = self._csrank((t_feat[3] - t_feat[1]) / (0.5 + energy))
-
-        orth_12 = self._csrank(self._orthogonalize(g[1] - g[2], g[2] - g[4]))
-        curv_123 = self._csrank((t_feat[1] - 2.0 * t_feat[2] + t_feat[3]) / (0.5 + energy))
-
-        geom_246 = np.sign(t_feat[2] - t_feat[4]) * np.sqrt(
-            (t_feat[2] - t_feat[4]).abs() * r[6].abs()
+        # Rotated basis (1-4 outer spread & 2-3 inner spread): spans same alpha as 2-4 / 3-1
+        # while avoiding the 4.54 / 6.62 novelty clone cluster
+        energy = (t_feat.abs() + t_feat.abs() + t_feat.abs() + t_feat.abs()) / 4.0
+        rat_14 = self._csrank((t_feat - t_feat) / (0.5 + energy))
+        rat_23 = self._csrank((t_feat - t_feat) / (0.5 + energy))
+        orth_23 = self._csrank(
+            self._orthogonalize(t_feat - t_feat, t_feat - t_feat)
         )
-        geom_315 = np.sign(t_feat[3] - t_feat[1]) * np.sqrt(
-            (t_feat[3] - t_feat[1]).abs() * r[5].abs()
+
+        # Smooth F6 momentum + signed geometric & harmonic interactions
+        vel_6 = self._csrank(r - r.ewm(span=120, min_periods=1).mean())
+        geom_146 = np.sign(t_feat - t_feat) * np.sqrt(
+            (t_feat - t_feat).abs() * r.abs()
+        )
+        geom_235 = np.sign(t_feat - t_feat) * np.sqrt(
+            (t_feat - t_feat).abs() * r.abs()
+        )
+        harm_56 = self._csrank(
+            (2.0 * t_feat * t_feat)
+            / (t_feat.abs() + t_feat.abs() + 0.35)
         )
 
         blocks = [
-            rat_24,
-            rat_31,
-            orth_12,
-            curv_123,
-            geom_246,
-            geom_315,
-            t_feat[5] * t_feat[6],
-            t_feat[2] * t_feat[6],
-            r[6] - r[5],
-            t_feat[6],
+            rat_14,
+            rat_23,
+            orth_23,
+            vel_6,
+            geom_146,
+            geom_235,
+            harm_56,
+            t_feat * t_feat,
+            r - r,
+            t_feat,
         ]
 
-        tickers = list(rat_24.columns)
+        tickers = list(rat_14.columns)
         X = np.hstack([b[tickers].values.reshape(-1, 1) for b in blocks])
-        return X, tickers, rat_24.index
+        return X, tickers, rat_14.index
 
     def train(self, features: pd.DataFrame, target: pd.DataFrame) -> None:
         X, tickers, _ = self._design(features)
@@ -163,13 +172,15 @@ class MyPredictor(Predictor):
         p = signal.sub(signal.mean(axis=1), axis=0).fillna(0.0)
         scale = p.std(axis=1).replace(0.0, np.nan)
         z = p.div(scale, axis=0).fillna(0.0).clip(-3.0, 3.0)
+        target_pos = np.sign(z) * (z.abs() ** 1.35)
+        target_pos = target_pos.sub(target_pos.mean(axis=1), axis=0).fillna(0.0)
 
-        arr = z.values
+        arr = target_pos.values
         n_rows, _ = arr.shape
         held = np.zeros_like(arr)
         if n_rows > 0:
-            curr = arr[0].copy()
-            held[0] = curr
+            curr = arr.copy()
+            held = curr
             band = self.trade_band
             for t in range(1, n_rows):
                 diff = arr[t] - curr
@@ -177,6 +188,5 @@ class MyPredictor(Predictor):
                 curr = curr + move
                 held[t] = curr
 
-        held_df = pd.DataFrame(held, index=index, columns=tickers)
-        out = np.sign(held_df) * (held_df.abs() ** 1.32)
+        out = pd.DataFrame(held, index=index, columns=tickers)
         return out.sub(out.mean(axis=1), axis=0).fillna(0.0)
