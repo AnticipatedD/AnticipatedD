@@ -10,7 +10,7 @@ warnings.filterwarnings("ignore")
 class MyPredictor(Predictor):
     def __init__(self):
         self.models = []
-        self.seeds = (37, 89, 163, 251)
+        self.seeds = (47, 113, 197, 283)
         self.params = {
             "objective": "reg:pseudohubererror",
             "huber_slope": 0.015,
@@ -18,16 +18,16 @@ class MyPredictor(Predictor):
             "eta": 0.03,
             "subsample": 0.75,
             "colsample_bytree": 0.70,
-            "min_child_weight": 1000,
-            "reg_lambda": 24.0,
+            "min_child_weight": 950,
+            "reg_lambda": 22.0,
             "reg_alpha": 2.0,
             "verbosity": 0,
             "nthread": 4,
         }
-        self.n_rounds = 28
-        self.ema1_span = 540
-        self.ema2_span = 340
-        self.slow_span = 3000
+        self.n_rounds = 32
+        self.ema1_span = 140
+        self.ema2_span = 90
+        self.slow_span = 1250
         self.trade_band = 0.40
 
     @staticmethod
@@ -43,48 +43,41 @@ class MyPredictor(Predictor):
         n = df.notna().sum(axis=1).values.reshape(-1, 1)
         return (r - 0.5 * (n + 1.0)) / (0.5 * np.maximum(n - 1.0, 1.0))
 
-    @staticmethod
-    def _orthogonalize(target_df: pd.DataFrame, basis_df: pd.DataFrame) -> pd.DataFrame:
-        num = (target_df * basis_df).sum(axis=1)
-        den = (basis_df * basis_df).sum(axis=1).replace(0.0, np.nan)
-        beta = (num / den).fillna(0.0)
-        return target_df.sub(basis_df.mul(beta, axis=0), axis=0)
-
     def _blocks(self, features: pd.DataFrame) -> dict[str, pd.DataFrame]:
         g = {i: features[f"Feature.{i}"] for i in range(1, 7)}
         t_feat = {i: self._robust_tanh(g.get(i)) for i in range(1, 7)}
         r = {i: self._csrank(g.get(i)) for i in range(1, 7)}
 
-        base_15 = t_feat.get(1) - t_feat.get(5)
-        s15 = self._csrank(base_15)
-        s62 = self._csrank(self._orthogonalize(t_feat.get(6) - t_feat.get(2), base_15))
-        s35 = self._csrank(self._orthogonalize(t_feat.get(3) - t_feat.get(5), base_15))
+        # Energy-damped MAD-copula ratios on orthogonal pairs (F1-F5, F3-F4, F6-F2)
+        energy = (t_feat.get(2).abs() + t_feat.get(5).abs() + t_feat.get(6).abs()) / 3.0
+        rat_15 = self._csrank((t_feat.get(1) - t_feat.get(5)) / (0.5 + energy))
+        rat_34 = self._csrank((t_feat.get(3) - t_feat.get(4)) / (0.5 + energy))
+        rat_62 = self._csrank((t_feat.get(6) - t_feat.get(2)) / (0.5 + energy))
 
         geom_156 = np.sign(t_feat.get(1) - t_feat.get(5)) * np.sqrt(
             (t_feat.get(1) - t_feat.get(5)).abs() * r.get(6).abs()
         )
-        geom_624 = np.sign(t_feat.get(6) - t_feat.get(2)) * np.sqrt(
-            (t_feat.get(6) - t_feat.get(2)).abs() * r.get(4).abs()
+        geom_345 = np.sign(t_feat.get(3) - t_feat.get(4)) * np.sqrt(
+            (t_feat.get(3) - t_feat.get(4)).abs() * r.get(5).abs()
         )
-        v6_slow = self._csrank(r.get(6) - r.get(6).ewm(span=72, min_periods=1).mean())
 
         return {
-            "s15": s15,
-            "s62": s62,
-            "s35": s35,
+            "rat_15": rat_15,
+            "rat_34": rat_34,
+            "rat_62": rat_62,
             "geom_156": geom_156,
-            "geom_624": geom_624,
-            "v6_slow": v6_slow,
+            "geom_345": geom_345,
             "prod_16": t_feat.get(1) * t_feat.get(6),
             "prod_36": t_feat.get(3) * t_feat.get(6),
+            "diff_65": r.get(6) - r.get(5),
             "t6": t_feat.get(6),
         }
 
     def _design(self, features: pd.DataFrame):
         b = self._blocks(features)
-        tickers = list(b["s15"].columns)
+        tickers = list(b["rat_15"].columns)
         X = np.hstack([d[tickers].values.reshape(-1, 1) for d in b.values()])
-        return X, tickers, b["s15"].index
+        return X, tickers, b["rat_15"].index
 
     def train(self, features: pd.DataFrame, target: pd.DataFrame) -> None:
         X, tickers, _ = self._design(features)
