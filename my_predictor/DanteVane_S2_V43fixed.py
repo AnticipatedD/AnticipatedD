@@ -56,7 +56,7 @@ class MyPredictor(Predictor):
         }
         self.xgb_rounds = 25
 
-        # Combined with pre-smoothing (span=45), total effective lag matches ~210/140/1800
+        # Pre-denoising (span=45) + post-filter (165/110/1750) targets >0.0100 Sharpe
         self.pre_span = 45
         self.ema1_span = 165
         self.ema2_span = 110
@@ -84,7 +84,6 @@ class MyPredictor(Predictor):
         return target_df.sub(basis_df.mul(beta, axis=0), axis=0)
 
     def _design(self, features: pd.DataFrame):
-        # Causal pre-denoising so trees train on clean regime structure rather than 1-bar noise
         g = {
             i: features[f"Feature.{i}"].ewm(span=self.pre_span, min_periods=1).mean()
             for i in range(1, 7)
@@ -161,7 +160,6 @@ class MyPredictor(Predictor):
         slow = lp2.shift(1).ewm(span=self.slow_span, min_periods=1).mean()
         signal = (lp2 - slow).fillna(0.0)
 
-        # Unit-variance z-score BEFORE deadband so hysteresis works uniformly across regimes
         p = signal.sub(signal.mean(axis=1), axis=0).fillna(0.0)
         scale = p.std(axis=1).replace(0.0, np.nan)
         z = p.div(scale, axis=0).fillna(0.0).clip(-3.0, 3.0)
@@ -179,7 +177,6 @@ class MyPredictor(Predictor):
                 curr = curr + move
                 held[t] = curr
 
-        # Apply 1.32 conviction curve AFTER deadband for smooth, low-fee position scaling
         held_df = pd.DataFrame(held, index=index, columns=tickers)
         out = np.sign(held_df) * (held_df.abs() ** 1.32)
         return out.sub(out.mean(axis=1), axis=0).fillna(0.0)
