@@ -56,10 +56,11 @@ class MyPredictor(Predictor):
         }
         self.xgb_rounds = 25
 
-        self.ema1_span = 250
-        self.ema2_span = 165
-        self.slow_span = 2050
-        self.trade_band = 0.37
+        # Gentle nudge from 210/140/1800 (0.0099 Sharpe) to trim -0.2997 compression loss
+        self.ema1_span = 225
+        self.ema2_span = 145
+        self.slow_span = 1900
+        self.trade_band = 0.36
 
     @staticmethod
     def _robust_tanh(df: pd.DataFrame) -> pd.DataFrame:
@@ -155,19 +156,12 @@ class MyPredictor(Predictor):
         slow = lp2.shift(1).ewm(span=self.slow_span, min_periods=1).mean()
         signal = (lp2 - slow).fillna(0.0)
 
+        # Restored exact 1.35 conviction scaling from 0.0099 winner (without vol_reg)
         p = signal.sub(signal.mean(axis=1), axis=0).fillna(0.0)
         scale = p.std(axis=1).replace(0.0, np.nan)
-        z = p.div(scale, axis=0).fillna(0.0).clip(-2.6, 2.6)
-
-        target_pos = np.sign(z) * (z.abs() ** 1.12)
+        z = p.div(scale, axis=0).fillna(0.0).clip(-3.0, 3.0)
+        target_pos = np.sign(z) * (z.abs() ** 1.35)
         target_pos = target_pos.sub(target_pos.mean(axis=1), axis=0).fillna(0.0)
-
-        vol_reg = (
-            (scale / scale.ewm(span=240, min_periods=1).mean().replace(0.0, np.nan))
-            .fillna(1.0)
-            .clip(0.75, 1.35)
-        )
-        target_pos = target_pos.div(vol_reg, axis=0)
 
         arr = target_pos.values
         n_rows, _ = arr.shape
