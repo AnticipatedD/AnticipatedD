@@ -55,14 +55,11 @@ class MyPredictor(Predictor):
         t_feat = {i: self._robust_tanh(g.get(i)) for i in range(1, 7)}
         r = {i: self._csrank(g.get(i)) for i in range(1, 7)}
 
-        # Orthogonal subspace anchored on Feature.1, Feature.5, and Feature.6
-        # (avoids [★ Q15]'s primary rat_24 and rat_31 axes)
         base_15 = t_feat.get(1) - t_feat.get(5)
         s15 = self._csrank(base_15)
         s62 = self._csrank(self._orthogonalize(t_feat.get(6) - t_feat.get(2), base_15))
         s35 = self._csrank(self._orthogonalize(t_feat.get(3) - t_feat.get(5), base_15))
 
-        # Signed geometric interactions + multi-hour rank momentum
         geom_156 = np.sign(t_feat.get(1) - t_feat.get(5)) * np.sqrt(
             (t_feat.get(1) - t_feat.get(5)).abs() * r.get(6).abs()
         )
@@ -125,8 +122,8 @@ class MyPredictor(Predictor):
         n_rows, _ = arr.shape
         held = np.zeros_like(arr)
         if n_rows > 0:
-            curr = arr.copy()
-            held = curr
+            curr = next(iter(arr)).copy()
+            held[:1] = curr
             band = self.trade_band
             for t in range(1, n_rows):
                 diff = arr[t] - curr
