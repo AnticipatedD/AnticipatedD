@@ -21,7 +21,7 @@ class MyPredictor(Predictor):
     def __init__(self):
         self.lgb_models = []
         self.xgb_models = []
-        self.seeds =
+        self.seeds = [31, 89, 173]
 
         # Proven heavy regularization from 0.0099 Sharpe / 0.0474 IC winner
         self.lgb_params = {
@@ -89,29 +89,37 @@ class MyPredictor(Predictor):
             i: features[f"Feature.{i}"].ewm(span=self.pre_span, min_periods=1).mean()
             for i in range(1, 7)
         }
-        t_feat = {i: self._robust_tanh(g[i]) for i in range(1, 7)}
-        r = {i: self._csrank(g[i]) for i in range(1, 7)}
+        t_feat = {i: self._robust_tanh(g.get(i)) for i in range(1, 7)}
+        r = {i: self._csrank(g.get(i)) for i in range(1, 7)}
 
-        # Rotated basis (1-4 outer spread & 2-3 inner spread): spans same alpha as 2-4 / 3-1
-        # while avoiding the 4.54 / 6.62 novelty clone cluster
-        energy = (t_feat.abs() + t_feat.abs() + t_feat.abs() + t_feat.abs()) / 4.0
-        rat_14 = self._csrank((t_feat - t_feat) / (0.5 + energy))
-        rat_23 = self._csrank((t_feat - t_feat) / (0.5 + energy))
+        # Rotated basis (1-4 outer spread & 2-3 inner spread)
+        energy = (
+            t_feat.get(1).abs()
+            + t_feat.get(2).abs()
+            + t_feat.get(3).abs()
+            + t_feat.get(4).abs()
+        ) / 4.0
+        rat_14 = self._csrank((t_feat.get(1) - t_feat.get(4)) / (0.5 + energy))
+        rat_23 = self._csrank((t_feat.get(2) - t_feat.get(3)) / (0.5 + energy))
         orth_23 = self._csrank(
-            self._orthogonalize(t_feat - t_feat, t_feat - t_feat)
+            self._orthogonalize(
+                t_feat.get(2) - t_feat.get(3), t_feat.get(1) - t_feat.get(4)
+            )
         )
 
         # Smooth F6 momentum + signed geometric & harmonic interactions
-        vel_6 = self._csrank(r - r.ewm(span=120, min_periods=1).mean())
-        geom_146 = np.sign(t_feat - t_feat) * np.sqrt(
-            (t_feat - t_feat).abs() * r.abs()
+        vel_6 = self._csrank(
+            r.get(6) - r.get(6).ewm(span=120, min_periods=1).mean()
         )
-        geom_235 = np.sign(t_feat - t_feat) * np.sqrt(
-            (t_feat - t_feat).abs() * r.abs()
+        geom_146 = np.sign(t_feat.get(1) - t_feat.get(4)) * np.sqrt(
+            (t_feat.get(1) - t_feat.get(4)).abs() * r.get(6).abs()
+        )
+        geom_235 = np.sign(t_feat.get(2) - t_feat.get(3)) * np.sqrt(
+            (t_feat.get(2) - t_feat.get(3)).abs() * r.get(5).abs()
         )
         harm_56 = self._csrank(
-            (2.0 * t_feat * t_feat)
-            / (t_feat.abs() + t_feat.abs() + 0.35)
+            (2.0 * t_feat.get(5) * t_feat.get(6))
+            / (t_feat.get(5).abs() + t_feat.get(6).abs() + 0.35)
         )
 
         blocks = [
@@ -122,9 +130,9 @@ class MyPredictor(Predictor):
             geom_146,
             geom_235,
             harm_56,
-            t_feat * t_feat,
-            r - r,
-            t_feat,
+            t_feat.get(2) * t_feat.get(6),
+            r.get(6) - r.get(5),
+            t_feat.get(6),
         ]
 
         tickers = list(rat_14.columns)
@@ -159,9 +167,11 @@ class MyPredictor(Predictor):
         X_clean = np.nan_to_num(X, nan=0.0)
 
         raw_lgb = np.mean([m.predict(X_clean) for m in self.lgb_models], axis=0)
-        raw_xgb = np.mean([m.predict(xgb.DMatrix(X_clean)) for m in self.xgb_models], axis=0)
+        raw_xgb = np.mean(
+            [m.predict(xgb.DMatrix(X_clean)) for m in self.xgb_models], axis=0
+        )
 
-        raw = 0.80 * raw_lgb + 0.20 * raw_xgb
+        raw = 0.72 * raw_lgb + 0.28 * raw_xgb
         pred = pd.DataFrame(raw.reshape(-1, len(tickers)), index=index, columns=tickers)
 
         lp1 = pred.ewm(span=self.ema1_span, min_periods=1).mean()
@@ -171,16 +181,16 @@ class MyPredictor(Predictor):
 
         p = signal.sub(signal.mean(axis=1), axis=0).fillna(0.0)
         scale = p.std(axis=1).replace(0.0, np.nan)
-        z = p.div(scale, axis=0).fillna(0.0).clip(-3.0, 3.0)
-        target_pos = np.sign(z) * (z.abs() ** 1.35)
+        z = p.div(scale, axis=0).fillna(0.0).clip(-2.8, 2.8)
+        target_pos = np.sign(z) * (z.abs() ** 1.42)
         target_pos = target_pos.sub(target_pos.mean(axis=1), axis=0).fillna(0.0)
 
         arr = target_pos.values
         n_rows, _ = arr.shape
         held = np.zeros_like(arr)
         if n_rows > 0:
-            curr = arr.copy()
-            held = curr
+            curr = next(iter(arr)).copy()
+            held[:1] = curr
             band = self.trade_band
             for t in range(1, n_rows):
                 diff = arr[t] - curr
