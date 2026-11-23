@@ -19,7 +19,7 @@ warnings.filterwarnings("ignore")
 class MyPredictor(Predictor):
     def __init__(self):
         self.models = []
-        self.seeds = (53, 127, 223, 311)
+        self.seeds = (61, 139, 233, 337)
         self.params = {
             "objective": "huber",
             "alpha": 0.015,
@@ -38,9 +38,9 @@ class MyPredictor(Predictor):
             "n_jobs": 4,
             "verbose": -1,
         }
-        self.ema1_span = 110
-        self.ema2_span = 70
-        self.slow_span = 1100
+        self.ema1_span = 440
+        self.ema2_span = 280
+        self.slow_span = 2800
         self.trade_band = 0.42
 
     @staticmethod
@@ -56,19 +56,12 @@ class MyPredictor(Predictor):
         n = df.notna().sum(axis=1).values.reshape(-1, 1)
         return (r - 0.5 * (n + 1.0)) / (0.5 * np.maximum(n - 1.0, 1.0))
 
-    @staticmethod
-    def _orthogonalize(target_df: pd.DataFrame, basis_df: pd.DataFrame) -> pd.DataFrame:
-        num = (target_df * basis_df).sum(axis=1)
-        den = (basis_df * basis_df).sum(axis=1).replace(0.0, np.nan)
-        beta = (num / den).fillna(0.0)
-        return target_df.sub(basis_df.mul(beta, axis=0), axis=0)
-
     def _design(self, features: pd.DataFrame):
         g = {i: features[f"Feature.{i}"] for i in range(1, 7)}
         t_feat = {i: self._robust_tanh(g.get(i)) for i in range(1, 7)}
         r = {i: self._csrank(g.get(i)) for i in range(1, 7)}
 
-        # Pure adjacent step differentials (verified Corr_vs_Q15 = +0.286 / 73.4 deg)
+        # Term-structure curvature & asymmetric tail ratios over slow horizon
         e_all = (
             t_feat.get(1).abs()
             + t_feat.get(2).abs()
@@ -76,36 +69,28 @@ class MyPredictor(Predictor):
             + t_feat.get(4).abs()
         ) / 4.0
 
+        curv_123 = self._csrank((t_feat.get(1) - 2.0 * t_feat.get(2) + t_feat.get(3)) / (0.5 + e_all))
+        curv_234 = self._csrank((t_feat.get(2) - 2.0 * t_feat.get(3) + t_feat.get(4)) / (0.5 + e_all))
         lad_21 = self._csrank((t_feat.get(2) - t_feat.get(1)) / (0.5 + e_all))
-        lad_32 = self._csrank((t_feat.get(3) - t_feat.get(2)) / (0.5 + e_all))
-        lad_43 = self._csrank((t_feat.get(4) - t_feat.get(3)) / (0.5 + e_all))
 
-        orth_32 = self._csrank(
-            self._orthogonalize(t_feat.get(3) - t_feat.get(2), t_feat.get(2) - t_feat.get(1))
-        )
-        geom_216 = np.sign(t_feat.get(2) - t_feat.get(1)) * np.sqrt(
-            (t_feat.get(2) - t_feat.get(1)).abs() * r.get(6).abs()
-        )
-        geom_435 = np.sign(t_feat.get(4) - t_feat.get(3)) * np.sqrt(
-            (t_feat.get(4) - t_feat.get(3)).abs() * r.get(5).abs()
-        )
+        geom_c1 = np.sign(curv_123) * np.sqrt(curv_123.abs() * r.get(6).abs())
+        geom_c2 = np.sign(curv_234) * np.sqrt(curv_234.abs() * r.get(5).abs())
 
         blocks = [
+            curv_123,
+            curv_234,
             lad_21,
-            lad_32,
-            lad_43,
-            orth_32,
-            geom_216,
-            geom_435,
-            t_feat.get(1) * t_feat.get(5),
-            t_feat.get(4) * t_feat.get(6),
-            r.get(6) - r.get(1),
-            t_feat.get(5),
+            geom_c1,
+            geom_c2,
+            t_feat.get(3) * t_feat.get(6),
+            t_feat.get(4) * t_feat.get(5),
+            r.get(6) - r.get(2),
+            t_feat.get(6),
         ]
 
-        tickers = list(lad_21.columns)
+        tickers = list(curv_123.columns)
         X = np.hstack([b[tickers].values.reshape(-1, 1) for b in blocks])
-        return X, tickers, lad_21.index
+        return X, tickers, curv_123.index
 
     def train(self, features: pd.DataFrame, target: pd.DataFrame) -> None:
         X, tickers, _ = self._design(features)
