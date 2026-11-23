@@ -21,7 +21,7 @@ class MyPredictor(Predictor):
     def __init__(self):
         self.lgb_models = []
         self.xgb_models = []
-        self.seeds = [31, 89, 173, 251]
+        self.seeds = [31, 89, 173]
 
         self.lgb_params = {
             "objective": "huber",
@@ -56,7 +56,6 @@ class MyPredictor(Predictor):
         }
         self.xgb_rounds = 25
 
-        # Slightly deeper smoothing + 0.37 band to cut -0.2997 compression loss while keeping IC ~0.046
         self.ema1_span = 250
         self.ema2_span = 165
         self.slow_span = 2050
@@ -87,7 +86,6 @@ class MyPredictor(Predictor):
         t_feat = {i: self._robust_tanh(g[i]) for i in range(1, 7)}
         r = {i: self._csrank(g[i]) for i in range(1, 7)}
 
-        # Exact 0.0474 IC MAD-copula feature set
         energy = (t_feat[1].abs() + t_feat[3].abs() + t_feat[4].abs()) / 3.0
         rat_24 = self._csrank((t_feat[2] - t_feat[4]) / (0.5 + energy))
         rat_31 = self._csrank((t_feat[3] - t_feat[1]) / (0.5 + energy))
@@ -159,14 +157,16 @@ class MyPredictor(Predictor):
 
         p = signal.sub(signal.mean(axis=1), axis=0).fillna(0.0)
         scale = p.std(axis=1).replace(0.0, np.nan)
-        z = p.div(scale, axis=0).fillna(0.0).clip(-2.8, 2.8)
+        z = p.div(scale, axis=0).fillna(0.0).clip(-2.6, 2.6)
 
-        # Lower exponent (1.12 vs 1.35) reduces tail concentration & fee churn
         target_pos = np.sign(z) * (z.abs() ** 1.12)
         target_pos = target_pos.sub(target_pos.mean(axis=1), axis=0).fillna(0.0)
 
-        # Inverse-dispersion vol targeting scales down exposure in noisy regimes
-        vol_reg = (scale / scale.ewm(span=240, min_periods=1).mean().replace(0.0, np.nan)).fillna(1.0).clip(0.75, 1.35)
+        vol_reg = (
+            (scale / scale.ewm(span=240, min_periods=1).mean().replace(0.0, np.nan))
+            .fillna(1.0)
+            .clip(0.75, 1.35)
+        )
         target_pos = target_pos.div(vol_reg, axis=0)
 
         arr = target_pos.values
