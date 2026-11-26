@@ -16,8 +16,8 @@ warnings.filterwarnings("ignore")
 
 
 class MyPredictor(Predictor):
-    """Contemporaneous cross-sectional predictor designed for causal safety,
-    row-position invariance, and overfitting-gate resilience."""
+    """Cross-sectional predictor engineered to avoid prolonged flat stretches
+    while preserving causal safety, row-position invariance, and low capacity."""
 
     def __init__(self):
         self.models = []
@@ -25,16 +25,16 @@ class MyPredictor(Predictor):
         self.params = {
             "objective": "regression_l1",
             "boosting_type": "gbdt",
-            "num_leaves": 5,
+            "num_leaves": 6,
             "max_depth": 2,
-            "learning_rate": 0.03,
+            "learning_rate": 0.035,
             "subsample": 0.8,
             "subsample_freq": 1,
-            "colsample_bytree": 0.75,
-            "min_child_samples": 400,
-            "reg_alpha": 2.0,
-            "reg_lambda": 15.0,
-            "n_estimators": 35,
+            "colsample_bytree": 0.8,
+            "min_child_samples": 200,
+            "reg_alpha": 1.0,
+            "reg_lambda": 10.0,
+            "n_estimators": 40,
             "n_jobs": 2,
             "verbose": -1,
         }
@@ -82,11 +82,12 @@ class MyPredictor(Predictor):
             blocks.append(r_df.to_numpy(dtype=np.float64).reshape(-1, 1))
             blocks.append(z_df.to_numpy(dtype=np.float64).reshape(-1, 1))
 
-        # Contemporaneous cross-sectional interactions and nonlinear contrasts
         spread_12 = self._cs_zscore(f_z["Feature.1"] - f_z["Feature.2"])
         spread_34 = self._cs_zscore(f_z["Feature.3"] - f_z["Feature.4"])
         spread_56 = self._cs_zscore(f_z["Feature.5"] - f_z["Feature.6"])
-        curv_246 = self._cs_zscore(f_rank["Feature.2"] - 2.0 * f_rank["Feature.4"] + f_rank["Feature.6"])
+        curv_246 = self._cs_zscore(
+            f_rank["Feature.2"] - 2.0 * f_rank["Feature.4"] + f_rank["Feature.6"]
+        )
         prod_13 = self._cs_zscore(f_z["Feature.1"] * f_z["Feature.3"])
         prod_25 = self._cs_zscore(f_z["Feature.2"] * f_z["Feature.5"])
 
@@ -130,13 +131,14 @@ class MyPredictor(Predictor):
         raw_mean = np.mean(preds_list, axis=0).reshape(n_rows, n_tickers)
         raw_df = pd.DataFrame(raw_mean, index=index, columns=tickers)
 
-        # Row-wise cross-sectional normalization + soft non-linear shaping
-        cs = self._demean_rows(raw_df)
-        row_l1 = np.abs(cs.to_numpy(dtype=np.float64)).sum(axis=1, keepdims=True)
-        safe_l1 = np.where(row_l1 > 1e-12, row_l1, 1.0)
-        normed = np.where(row_l1 > 1e-12, cs.to_numpy(dtype=np.float64) / safe_l1, 0.0)
-        shaped = np.tanh(2.0 * normed)
-        out_df = pd.DataFrame(shaped, index=index, columns=tickers)
+        cs = self._demean_rows(raw_df).to_numpy(dtype=np.float64)
+        row_std = np.std(cs, axis=1, keepdims=True)
+        # Normalize each row by its cross-sectional dispersion when active
+        # so positions stay responsive rather than collapsing to near-zero.
+        active = row_std > 1e-9
+        safe_std = np.where(active, row_std, 1.0)
+        scaled = np.where(active, cs / safe_std, cs)
+        out_df = pd.DataFrame(scaled, index=index, columns=tickers)
         return self._demean_rows(out_df)
 
 
