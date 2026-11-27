@@ -18,14 +18,13 @@ warnings.filterwarnings("ignore")
 
 
 class MyPredictor(Predictor):
-    """Recovery & Sharpe-upgrade build for hectictulip.
+    """Self-contained signal generator for account hectictulip.
 
-    - Reference Prior ID : signal_2b7d903bfea044c3 (Sharpe 0.0061, IC 0.0436)
-    - Nearest Cluster    : signal_f3b9bfb99cfb3a90 (15.55 deg)
-    - Design Strategy    : Preserves full un-erased feature alpha (no 6-factor
-                           subspace deletion) while shifting model family &
-                           feature emphasis toward (F1, F3, F5, F6) interactions
-                           and dispersion-gated sizing for >0.045 IC and higher Sharpe.
+    - Prior Submission / Public ID : signal_2b7d903bfea044c3 (Sharpe 0.0061, IC 0.0436)
+    - Nearest City / Signal ID     : signal_f3b9bfb99cfb3a90 (15.55 deg)
+    - Design Strategy              : Preserves full un-erased feature alpha while shifting
+                                     model family & feature emphasis toward (F1, F3, F5, F6)
+                                     interactions and dispersion-gated sizing.
     """
 
     def __init__(self):
@@ -34,7 +33,6 @@ class MyPredictor(Predictor):
         self.ridge_model = Ridge(alpha=1800.0, fit_intercept=False)
         self.seeds = (23, 67, 131)
 
-        # Low-capacity Huber GBDT (replaces ExtraTrees to shift signal angle & lift IC)
         self.lgb_params = {
             "objective": "huber",
             "alpha": 0.035,
@@ -60,7 +58,6 @@ class MyPredictor(Predictor):
             "fit_intercept": False,
         }
 
-        # Restores hectictulip's proven ~ -0.28 Compression Loss smoothing envelope
         self.fast_span = 150
         self.mid_span = 100
         self.base_span = 1600
@@ -95,31 +92,29 @@ class MyPredictor(Predictor):
         ema_long = {i: z[i].ewm(span=135, min_periods=1).mean() for i in range(1, 7)}
         vel = {i: self._cs_rank(ema_short[i] - ema_long[i]) for i in range(1, 7)}
 
-        # Keep full un-erased primary alpha while emphasizing distinct (F1, F3, F5, F6) combinations
-        disp = (z.abs() + z.abs() + z.abs() + z.abs()) / 4.0
+        disp = (z[1].abs() + z[3].abs() + z[5].abs() + z[6].abs()) / 4.0
 
-        # Light selective orthogonalization on only 2 features (same safe ratio as hectictulip V1)
-        orth_35 = self._cs_rank(self._orthogonalize(z - z, z - z))
-        orth_16 = self._cs_rank(self._orthogonalize(z + z, z - z))
+        orth_35 = self._cs_rank(self._orthogonalize(z[3] - z[5], z[2] - z[4]))
+        orth_16 = self._cs_rank(self._orthogonalize(z[1] + z[6], z[3] - z[1]))
 
         blocks = [
             orth_35,
             orth_16,
-            self._cs_rank((ema_long - ema_long) * (0.5 + disp)),
-            self._cs_rank((ema_long - ema_long) * (0.5 + disp)),
-            self._cs_rank((ema_long - ema_long) * (0.5 + disp)),
-            self._cs_rank(vel - vel),
-            self._cs_rank(vel - vel),
-            self._cs_rank(np.sign(z - z) * np.sqrt((z - z).abs() * r.abs())),
-            self._cs_rank(np.sign(z - z) * np.sqrt((z - z).abs() * r.abs())),
-            self._cs_rank(z * z),
-            self._cs_rank(z * z),
-            self._cs_rank(ema_long),
+            self._cs_rank((ema_long[3] - ema_long[5]) * (0.5 + disp)),
+            self._cs_rank((ema_long[1] - ema_long[6]) * (0.5 + disp)),
+            self._cs_rank((ema_long[4] - ema_long[6]) * (0.5 + disp)),
+            self._cs_rank(vel[1] - vel[5]),
+            self._cs_rank(vel[3] - vel[6]),
+            self._cs_rank(np.sign(z[3] - z[5]) * np.sqrt((z[3] - z[5]).abs() * r[6].abs())),
+            self._cs_rank(np.sign(z[1] - z[6]) * np.sqrt((z[1] - z[6]).abs() * r[5].abs())),
+            self._cs_rank(z[3] * z[6]),
+            self._cs_rank(z[1] * z[5]),
+            self._cs_rank(ema_long[6]),
         ]
 
-        tickers = list(blocks.columns)
+        tickers = list(blocks[0].columns)
         X = np.hstack([b[tickers].values.reshape(-1, 1) for b in blocks])
-        return X, tickers, blocks.index
+        return X, tickers, blocks[0].index
 
     def train(self, features: pd.DataFrame, target: pd.DataFrame) -> None:
         X, tickers, _ = self._design(features)
@@ -165,13 +160,11 @@ class MyPredictor(Predictor):
         raw = 0.65 * raw_lgb + 0.20 * raw_hb + 0.15 * raw_rd
         pred = pd.DataFrame(raw.reshape(n_rows, n_tickers), index=index, columns=tickers)
 
-        # Two-stage low-pass + slow baseline removal (restores ~ -0.28 Compression Loss)
         lp1 = pred.ewm(span=self.fast_span, min_periods=1).mean()
         lp2 = lp1.ewm(span=self.mid_span, min_periods=1).mean()
         baseline = lp2.shift(1).ewm(span=self.base_span, min_periods=1).mean()
         signal = (lp2 - baseline).fillna(0.0)
 
-        # Dispersion-gated convex sizing (restores Concentration ~0.16 & lifts IC Dispersion)
         cs = signal.sub(signal.mean(axis=1), axis=0).fillna(0.0)
         scale = cs.std(axis=1).replace(0.0, np.nan)
         disp_gate = (scale / scale.ewm(span=240, min_periods=1).mean()).clip(0.75, 1.35).fillna(1.0)
@@ -180,12 +173,11 @@ class MyPredictor(Predictor):
         target_pos = (np.sign(z) * (z.abs() ** 1.35)).mul(disp_gate, axis=0)
         target_pos = target_pos.sub(target_pos.mean(axis=1), axis=0).fillna(0.0)
 
-        # Neutrality-preserving hysteresis loop (zero phantom turnover on locked tickers)
         arr = target_pos.values
         held = np.zeros_like(arr)
-        curr = arr.copy()
+        curr = arr[0].copy()
         curr -= curr.mean()
-        held = curr
+        held[0] = curr
         band = self.deadzone
 
         for t in range(1, n_rows):
