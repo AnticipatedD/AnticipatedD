@@ -18,13 +18,13 @@ warnings.filterwarnings("ignore")
 
 
 class MyPredictor(Predictor):
-    """Self-contained signal generator for account hectictulip.
+    """Recovery & Sharpe-upgrade build for hectictulip.
 
-    - Prior Submission / Public ID : signal_2b7d903bfea044c3 (Sharpe 0.0061, IC 0.0436)
-    - Nearest City / Signal ID     : signal_f3b9bfb99cfb3a90 (15.55 deg)
-    - Design Strategy              : Preserves full un-erased feature alpha while shifting
-                                     model family & feature emphasis toward (F1, F3, F5, F6)
-                                     interactions and dispersion-gated sizing.
+    - Reference Prior ID : signal_2b7d903bfea044c3 (Sharpe 0.0061, IC 0.0436)
+    - Nearest Cluster    : signal_f3b9bfb99cfb3a90 (15.55 deg)
+    - Design Strategy    : Preserves full un-erased feature alpha while shifting
+                           model family & feature emphasis toward (F1, F3, F5, F6)
+                           interactions and dispersion-gated sizing.
     """
 
     def __init__(self):
@@ -85,36 +85,36 @@ class MyPredictor(Predictor):
 
     def _design(self, features: pd.DataFrame):
         g = {i: features[f"Feature.{i}"] for i in range(1, 7)}
-        z = {i: self._cs_zscore(g[i]) for i in range(1, 7)}
-        r = {i: self._cs_rank(g[i]) for i in range(1, 7)}
+        z = {i: self._cs_zscore(g.get(i)) for i in range(1, 7)}
+        r = {i: self._cs_rank(g.get(i)) for i in range(1, 7)}
 
-        ema_short = {i: z[i].ewm(span=30, min_periods=1).mean() for i in range(1, 7)}
-        ema_long = {i: z[i].ewm(span=135, min_periods=1).mean() for i in range(1, 7)}
-        vel = {i: self._cs_rank(ema_short[i] - ema_long[i]) for i in range(1, 7)}
+        ema_short = {i: z.get(i).ewm(span=30, min_periods=1).mean() for i in range(1, 7)}
+        ema_long = {i: z.get(i).ewm(span=135, min_periods=1).mean() for i in range(1, 7)}
+        vel = {i: self._cs_rank(ema_short.get(i) - ema_long.get(i)) for i in range(1, 7)}
 
-        disp = (z[1].abs() + z[3].abs() + z[5].abs() + z[6].abs()) / 4.0
+        disp = (z.get(1).abs() + z.get(3).abs() + z.get(5).abs() + z.get(6).abs()) / 4.0
 
-        orth_35 = self._cs_rank(self._orthogonalize(z[3] - z[5], z[2] - z[4]))
-        orth_16 = self._cs_rank(self._orthogonalize(z[1] + z[6], z[3] - z[1]))
+        orth_35 = self._cs_rank(self._orthogonalize(z.get(3) - z.get(5), z.get(2) - z.get(4)))
+        orth_16 = self._cs_rank(self._orthogonalize(z.get(1) + z.get(6), z.get(3) - z.get(1)))
 
         blocks = [
             orth_35,
             orth_16,
-            self._cs_rank((ema_long[3] - ema_long[5]) * (0.5 + disp)),
-            self._cs_rank((ema_long[1] - ema_long[6]) * (0.5 + disp)),
-            self._cs_rank((ema_long[4] - ema_long[6]) * (0.5 + disp)),
-            self._cs_rank(vel[1] - vel[5]),
-            self._cs_rank(vel[3] - vel[6]),
-            self._cs_rank(np.sign(z[3] - z[5]) * np.sqrt((z[3] - z[5]).abs() * r[6].abs())),
-            self._cs_rank(np.sign(z[1] - z[6]) * np.sqrt((z[1] - z[6]).abs() * r[5].abs())),
-            self._cs_rank(z[3] * z[6]),
-            self._cs_rank(z[1] * z[5]),
-            self._cs_rank(ema_long[6]),
+            self._cs_rank((ema_long.get(1) - ema_long.get(5)) * (0.5 + disp)),
+            self._cs_rank((ema_long.get(3) - ema_long.get(6)) * (0.5 + disp)),
+            self._cs_rank((ema_long.get(4) - ema_long.get(6)) * (0.5 + disp)),
+            self._cs_rank(vel.get(1) - vel.get(5)),
+            self._cs_rank(vel.get(3) - vel.get(6)),
+            self._cs_rank(np.sign(z.get(1) - z.get(5)) * np.sqrt((z.get(1) - z.get(5)).abs() * r.get(6).abs())),
+            self._cs_rank(np.sign(z.get(3) - z.get(6)) * np.sqrt((z.get(3) - z.get(6)).abs() * r.get(5).abs())),
+            self._cs_rank(z.get(1) * z.get(6)),
+            self._cs_rank(z.get(3) * z.get(5)),
+            self._cs_rank(ema_long.get(6)),
         ]
 
-        tickers = list(blocks[0].columns)
+        tickers = list(orth_35.columns)
         X = np.hstack([b[tickers].values.reshape(-1, 1) for b in blocks])
-        return X, tickers, blocks[0].index
+        return X, tickers, orth_35.index
 
     def train(self, features: pd.DataFrame, target: pd.DataFrame) -> None:
         X, tickers, _ = self._design(features)
