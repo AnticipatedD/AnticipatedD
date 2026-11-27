@@ -21,24 +21,22 @@ class MyPredictor(Predictor):
         self.et_models = []
         self.huber_model = None
         self.ridge_model = Ridge(alpha=1500.0, fit_intercept=False)
-        self.seeds = [29, 73, 149]
+        self.seeds = [41, 89, 173]
 
         self.et_params = {
             "n_estimators": 75,
-            "max_depth": 2,
-            "min_samples_leaf": 950,
+            "max_depth": 3,
+            "min_samples_leaf": 900,
             "max_features": 0.50,
             "bootstrap": True,
             "max_samples": 0.70,
             "n_jobs": 4,
-            "verbose": 0,
         }
 
         self.huber_params = {
             "alpha": 220.0,
             "epsilon": 1.35,
             "max_iter": 250,
-            "verbosity": 0,
             "fit_intercept": False,
         }
 
@@ -46,7 +44,7 @@ class MyPredictor(Predictor):
         self.fast_span = 30
         self.slow_span = 150
         self.base_span = 1600
-        self.fast_weight = 0.32
+        self.fast_weight = 0.65
         self.deadzone = 0.22
 
     @staticmethod
