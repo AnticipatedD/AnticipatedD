@@ -24,23 +24,22 @@ class MyPredictor(Predictor):
             "objective": "reg:pseudohubererror",
             "huber_slope": 0.015,
             "max_depth": 2,
-            "eta": 0.03,
-            "subsample": 0.75,
-            "colsample_bytree": 0.72,
-            "min_child_weight": 928,
-            "reg_lambda": 22.0,
+            "eta": 0.05,
+            "subsample": 0.8,
+            "colsample_bytree": 0.8,
+            "min_child_weight": 500,
+            "reg_lambda": 5.0,
             "reg_alpha": 2.0,
             "verbosity": 0,
             "nthread": 4,
         }
         self.n_rounds = 29
 
-        # Slightly faster than 180/120 to improve Compression Loss (-0.3549 -> ~ -0.31)
-        # while preserving smooth IC stability
-        self.ema1_span = 155
-        self.ema2_span = 95
+        # Tuned for S^18 concentration & Compression Loss stability
+        self.ema1_span = 160
+        self.ema2_span = 110
         self.slow_span = 1800
-        self.trade_band = 0.24
+        self.trade_band = 0.25
 
     @staticmethod
     def _csrank(df: pd.DataFrame) -> pd.DataFrame:
@@ -57,27 +56,38 @@ class MyPredictor(Predictor):
 
     def _blocks(self, features: pd.DataFrame) -> dict[str, pd.DataFrame]:
         # 100% contemporaneous features (zero rolling windows -> clears permutation gate)
-        g = {i: features[f"Feature.{i}"] for i in range(1, 7)}
-        r = {i: self._csrank(g[i]) for i in range(1, 7)}
+        g1 = features["Feature.1"]
+        g2 = features["Feature.2"]
+        g3 = features["Feature.3"]
+        g4 = features["Feature.4"]
+        g5 = features["Feature.5"]
+        g6 = features["Feature.6"]
 
-        d24 = g - g
+        r1 = self._csrank(g1)
+        r2 = self._csrank(g2)
+        r3 = self._csrank(g3)
+        r4 = self._csrank(g4)
+        r5 = self._csrank(g5)
+        r6 = self._csrank(g6)
+
+        d24 = g2 - g4
         s24 = self._csrank(d24)
-        s12 = self._csrank(self._orthogonalize(g - g, d24))
-        s13 = self._csrank(self._orthogonalize(g - g, d24))
-        s35 = self._csrank(self._orthogonalize(g - g, d24))
+        s12 = self._csrank(self._orthogonalize(g1 - g2, d24))
+        s13 = self._csrank(self._orthogonalize(g1 - g3, d24))
+        s35 = self._csrank(self._orthogonalize(g3 - g5, d24))
 
         return {
             "s24": s24,
             "s12": s12,
             "s13": s13,
             "s35": s35,
-            "i23_6": (r - r) * r,
-            "i24_5": (r - r) * r,
-            "i14_6": (r - r) * r,
-            "i13_5": (r - r) * r,
-            "p56": r * r,
-            "r5": r,
-            "r6": r,
+            "i23_6": (r2 - r3) * r6,
+            "i24_5": (r2 - r4) * r5,
+            "i14_6": (r1 - r4) * r6,
+            "i13_5": (r1 - r3) * r5,
+            "p56": r5 * r6,
+            "r5": r5,
+            "r6": r6,
         }
 
     def _design(self, features: pd.DataFrame):
@@ -113,20 +123,19 @@ class MyPredictor(Predictor):
         slow = lp2.shift(1).ewm(span=self.slow_span, min_periods=1).mean()
         signal = (lp2 - slow).fillna(0.0)
 
-        # Cross-sectional unit-variance scaling + Q20 conviction exponent (1.40)
+        # Cross-sectional unit-variance scaling + conviction exponent (1.35)
         p = signal.sub(signal.mean(axis=1), axis=0).fillna(0.0)
         scale = p.std(axis=1).replace(0.0, np.nan)
         z = p.div(scale, axis=0).fillna(0.0).clip(-3.0, 3.0)
         target_pos = np.sign(z) * (z.abs() ** 1.35)
         target_pos = target_pos.sub(target_pos.mean(axis=1), axis=0).fillna(0.0)
 
-        # Clean causal hysteresis no-trade band (suppresses 5 bp fee churn without null-test distortion)
-        arr = target_pos.values
+        # Clean causal hysteresis no-trade band (stabilizes S^18 trajectory & cuts fee churn)
+        arr = np.asarray(target_pos.values, dtype=np.float64)
         n_rows, _ = arr.shape
-        held = np.zeros_like(arr)
-        if n_rows > 2:
-            curr = arr.copy()
-            held = curr
+        held = arr.copy()
+        if n_rows > 1:
+            curr = arr[0].copy()
             band = self.trade_band
             for t in range(1, n_rows):
                 diff = arr[t] - curr
@@ -134,5 +143,6 @@ class MyPredictor(Predictor):
                 curr = curr + move
                 held[t] = curr
 
-        out = pd.DataFrame(held, index=index, columns=tickers)
-        return out.sub(out.mean(axis=1), axis=0).fillna(0.0)
+        out = pd.DataFrame(held, index=index, columns=tickers, dtype=np.float64)
+        out = out.sub(out.mean(axis=1), axis=0).fillna(0.0)
+        return out.astype(np.float64)
