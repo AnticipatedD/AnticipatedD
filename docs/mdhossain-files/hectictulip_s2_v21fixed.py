@@ -43,7 +43,7 @@ class MyPredictor(Predictor):
         }
         self.n_rounds = 28
         self.ema_span = 165
-        self.trade_band = 0.014
+        self.trade_band = 0.028
 
     @staticmethod
     def _csrank(df: pd.DataFrame) -> pd.DataFrame:
@@ -66,23 +66,23 @@ class MyPredictor(Predictor):
     def _blocks(self, features: pd.DataFrame) -> dict[str, pd.DataFrame]:
         # 100% contemporaneous features only (zero rolling windows -> passes permutation gate)
         g = {i: features[f"Feature.{i}"] for i in range(1, 7)}
-        r = {i: self._csrank(g[i]) for i in range(1, 7)}
+        r = {i: self._csrank(g.get(i)) for i in range(1, 7)}
 
         # Orthogonalize off the primary (F2 - F4) and F6 directions so this signal
         # explores a new >60 deg Quality Set city without colliding with existing entries
-        basis_24 = g - g
-        basis_6 = g
+        basis_24 = g.get(2) - g.get(4)
+        basis_6 = g.get(6)
 
-        s13 = self._orth_clean(g - g, basis_24, basis_6)
-        s15 = self._orth_clean(g - g, basis_24, basis_6)
-        s35 = self._orth_clean(g - g, basis_24, basis_6)
-        s45 = self._orth_clean(g - g, basis_24, basis_6)
+        s13 = self._orth_clean(g.get(1) - g.get(3), basis_24, basis_6)
+        s15 = self._orth_clean(g.get(1) - g.get(5), basis_24, basis_6)
+        s35 = self._orth_clean(g.get(3) - g.get(5), basis_24, basis_6)
+        s45 = self._orth_clean(g.get(4) - g.get(5), basis_24, basis_6)
 
-        i13_5 = self._orth_clean((r - r) * r, basis_24, basis_6)
-        i15_3 = self._orth_clean((r - r) * r, basis_24, basis_6)
-        i34_5 = self._orth_clean((r - r) * r, basis_24, basis_6)
-        p15 = self._orth_clean(r * r, basis_24, basis_6)
-        p35 = self._orth_clean(r * r, basis_24, basis_6)
+        i13_5 = self._orth_clean((r.get(1) - r.get(3)) * r.get(5), basis_24, basis_6)
+        i15_3 = self._orth_clean((r.get(1) - r.get(5)) * r.get(3), basis_24, basis_6)
+        i34_5 = self._orth_clean((r.get(3) - r.get(4)) * r.get(5), basis_24, basis_6)
+        p15 = self._orth_clean(r.get(1) * r.get(5), basis_24, basis_6)
+        p35 = self._orth_clean(r.get(3) * r.get(5), basis_24, basis_6)
 
         return {
             "s13": s13,
@@ -98,9 +98,9 @@ class MyPredictor(Predictor):
 
     def _design(self, features: pd.DataFrame):
         b = self._blocks(features)
-        tickers = list(b["s13"].columns)
+        tickers = list(b.get("s13").columns)
         X = np.hstack([d[tickers].values.reshape(-1, 1) for d in b.values()])
-        return X, tickers, b["s13"].index
+        return X, tickers, b.get("s13").index
 
     def train(self, features: pd.DataFrame, target: pd.DataFrame) -> None:
         X, tickers, _ = self._design(features)
@@ -133,7 +133,7 @@ class MyPredictor(Predictor):
         p = signal.sub(signal.mean(axis=1), axis=0).fillna(0.0)
         scale = p.std(axis=1).replace(0.0, np.nan)
         z = p.div(scale, axis=0).fillna(0.0).clip(-3.0, 3.0)
-        shaped = np.sign(z) * (z.abs() ** 1.42)
+        shaped = np.sign(z) * (z.abs() ** 1.40)
         shaped = shaped.sub(shaped.mean(axis=1), axis=0).fillna(0.0)
 
         l1_norm = shaped.abs().sum(axis=1).replace(0.0, np.nan)
@@ -149,8 +149,8 @@ class MyPredictor(Predictor):
         arr = target_pos.values
         held = np.zeros_like(arr)
         if n_rows > 2:
-            curr = arr.copy()
-            held = curr
+            curr = arr[0].copy()
+            held[0] = curr
             band = self.trade_band
             for t in range(1, n_rows):
                 diff = arr[t] - curr
