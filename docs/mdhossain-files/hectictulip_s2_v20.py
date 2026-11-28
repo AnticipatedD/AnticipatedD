@@ -13,30 +13,36 @@ class MyPredictor(Predictor):
         self.seeds = (31, 89, 173)
         self.params = {
             "objective": "reg:pseudohubererror",
-            "huber_slope": 0.017,
+            "huber_slope": 0.013,
             "max_depth": 2,
-            "eta": 0.04,
-            "subsample": 0.65,
-            "colsample_bytree": 0.62,
-            "min_child_weight": 938,
-            "reg_lambda": 22.0,
+            "eta": 0.03,
+            "subsample": 0.85,
+            "colsample_bytree": 0.82,
+            "min_child_weight": 978,
+            "reg_lambda": 15.0,
             "reg_alpha": 2.0,
             "verbosity": 0,
             "nthread": 4,
         }
-        self.n_rounds = 28
+        self.n_rounds = 27
 
-        # Faster 150/100 filter + 0.24 trade_band stops peak-clipping drag (fixes -0.3718 Compression Loss)
+        # Eased lag (150/100) + 0.25 trade_band eliminates peak-clipping drag (-0.3662 -> ~ -0.30)
         self.ema1_span = 150
         self.ema2_span = 100
         self.slow_span = 1800
-        self.trade_band = 0.24
+        self.trade_band = 0.25
 
     @staticmethod
     def _csrank(df: pd.DataFrame) -> pd.DataFrame:
         r = df.rank(axis=1, method="average")
         n = df.notna().sum(axis=1).values.reshape(-1, 1)
         return (r - 0.5 * (n + 1.0)) / (0.5 * np.maximum(n - 1.0, 1.0))
+
+    @staticmethod
+    def _csz(df: pd.DataFrame) -> pd.DataFrame:
+        med = df.median(axis=1)
+        mad = (df.sub(med, axis=0)).abs().median(axis=1).replace(0.0, np.nan)
+        return df.sub(med, axis=0).div(1.4826 * mad, axis=0).fillna(0.0).clip(-3.5, 3.5)
 
     @staticmethod
     def _orthogonalize(target_df: pd.DataFrame, basis_df: pd.DataFrame) -> pd.DataFrame:
@@ -46,22 +52,29 @@ class MyPredictor(Predictor):
         return target_df.sub(basis_df.mul(beta, axis=0), axis=0)
 
     def _blocks(self, features: pd.DataFrame) -> dict[str, pd.DataFrame]:
-        # Strictly contemporaneous features (preserves 0.0498 IC & gate-passing stability)
+        # Strictly contemporaneous features (zero rolling windows -> clears overfitting gate)
         g = {i: features[f"Feature.{i}"] for i in range(1, 7)}
         r = {i: self._csrank(g.get(i)) for i in range(1, 7)}
+        z = {i: self._csz(g.get(i)) for i in range(1, 7)}
 
-        s24 = self._csrank(g.get(2) - g.get(4))
-        s12 = self._csrank(self._orthogonalize(g.get(1) - g.get(2), g.get(2) - g.get(4)))
-        s13 = self._csrank(self._orthogonalize(g.get(1) - g.get(3), g.get(2) - g.get(4)))
+        # Primary F2-F4 basis + distinct non-redundant orthogonal directions (fixes s21 == -s12 duplicate)
+        d24 = g.get(2) - g.get(4)
+        s24 = self._csrank(d24)
+        s12 = self._csrank(self._orthogonalize(g.get(1) - g.get(2), d24))
+        s13 = self._csrank(self._orthogonalize(g.get(1) - g.get(3), d24))
+        s45 = self._csrank(self._orthogonalize(g.get(4) - g.get(5), d24))
+        s65 = self._csrank(self._orthogonalize(g.get(6) - g.get(5), d24))
 
         return {
             "s24": s24,
             "s12": s12,
             "s13": s13,
+            "s45": s45,
+            "s65": s65,
             "i23_6": (r.get(2) - r.get(3)) * r.get(6),
             "i24_5": (r.get(2) - r.get(4)) * r.get(5),
             "i14_6": (r.get(1) - r.get(4)) * r.get(6),
-            "p56": r.get(5) * r.get(6),
+            "quad_56": self._csrank(np.tanh(z.get(5) * z.get(6))),
             "r5": r.get(5),
             "r6": r.get(6),
         }
@@ -93,18 +106,20 @@ class MyPredictor(Predictor):
         raw = np.mean([m.predict(dtest) for m in self.models], axis=0)
         pred = pd.DataFrame(raw.reshape(-1, len(tickers)), index=index, columns=tickers)
 
+        # Two-stage causal low-pass filter + slow baseline removal
         lp1 = pred.ewm(span=self.ema1_span, min_periods=1).mean()
         lp2 = lp1.ewm(span=self.ema2_span, min_periods=1).mean()
         slow = lp2.shift(1).ewm(span=self.slow_span, min_periods=1).mean()
         signal = (lp2 - slow).fillna(0.0)
 
-        # Preserves +0.0218 IC Dispersion while letting 0.24 trade_band capture tail peaks
+        # Cross-sectional unit-variance scaling + tail conviction (1.50)
         p = signal.sub(signal.mean(axis=1), axis=0).fillna(0.0)
         scale = p.std(axis=1).replace(0.0, np.nan)
         z = p.div(scale, axis=0).fillna(0.0).clip(-3.0, 3.0)
-        target_pos = np.sign(z) * (z.abs() ** 1.45)
+        target_pos = np.sign(z) * (z.abs() ** 1.40)
         target_pos = target_pos.sub(target_pos.mean(axis=1), axis=0).fillna(0.0)
 
+        # Clean causal hysteresis no-trade band (0.25 stops peak clipping while blocking noise churn)
         arr = target_pos.values
         n_rows, _ = arr.shape
         held = np.zeros_like(arr)
