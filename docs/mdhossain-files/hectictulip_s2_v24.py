@@ -18,28 +18,30 @@ warnings.filterwarnings("ignore")
 class MyPredictor(Predictor):
     def __init__(self):
         self.models = []
-        # 5-seed ensemble reduces variance and lowers IC Dispersion (< 0.015)
-        self.seeds = (11, 29, 53, 97, 149)
+        # 7-seed ensemble further reduces variance and lowers IC Dispersion (< 0.015)
+        self.seeds = (11, 29, 53, 97, 149, 211, 283)
         self.params = {
             "objective": "reg:pseudohubererror",
-            "huber_slope": 0.015,
+            "huber_slope": 0.017,
             "max_depth": 2,
             "eta": 0.05,
-            "subsample": 0.8,
-            "colsample_bytree": 0.8,
-            "min_child_weight": 500,
-            "reg_lambda": 5.0,
-            "reg_alpha": 2.0,
+            "subsample": 0.75,
+            "colsample_bytree": 0.70,
+            "min_child_weight": 650,
+            "reg_lambda": 22.0,
+            "reg_alpha": 2.5,
             "verbosity": 0,
             "nthread": 4,
         }
-        self.n_rounds = 29
+        self.n_rounds = 28
 
-        # Tuned for S^18 concentration & Compression Loss stability
-        self.ema1_span = 160
-        self.ema2_span = 110
-        self.slow_span = 1800
-        self.trade_band = 0.25
+        # Faster causal filters + direct contemporaneous anchor to improve
+        # Compression Loss (-0.3642 -> closer to 0) and S^18 Concentration
+        self.ema1_span = 55
+        self.ema2_span = 35
+        self.slow_span = 1400
+        self.raw_blend = 0.35
+        self.trade_band = 0.20
 
     @staticmethod
     def _csrank(df: pd.DataFrame) -> pd.DataFrame:
@@ -75,16 +77,19 @@ class MyPredictor(Predictor):
         s12 = self._csrank(self._orthogonalize(g1 - g2, d24))
         s13 = self._csrank(self._orthogonalize(g1 - g3, d24))
         s35 = self._csrank(self._orthogonalize(g3 - g5, d24))
+        s46 = self._csrank(self._orthogonalize(g4 - g6, d24))
 
         return {
             "s24": s24,
             "s12": s12,
             "s13": s13,
             "s35": s35,
+            "s46": s46,
             "i23_6": (r2 - r3) * r6,
             "i24_5": (r2 - r4) * r5,
             "i14_6": (r1 - r4) * r6,
             "i13_5": (r1 - r3) * r5,
+            "i12_4": (r1 - r2) * r4,
             "p56": r5 * r6,
             "r5": r5,
             "r6": r6,
@@ -117,24 +122,31 @@ class MyPredictor(Predictor):
         raw = np.mean([m.predict(dtest) for m in self.models], axis=0)
         pred = pd.DataFrame(raw.reshape(-1, len(tickers)), index=index, columns=tickers)
 
-        # Two-stage causal low-pass filter + slow baseline removal
-        lp1 = pred.ewm(span=self.ema1_span, min_periods=1).mean()
+        # Cross-sectionally normalize raw ensemble prediction first to stabilize dispersion
+        pred_dm = pred.sub(pred.mean(axis=1), axis=0).fillna(0.0)
+        pred_z = pred_dm.div(pred_dm.std(axis=1).replace(0.0, np.nan), axis=0).fillna(0.0)
+
+        # Faster two-stage causal low-pass filter + slow baseline removal
+        lp1 = pred_z.ewm(span=self.ema1_span, min_periods=1).mean()
         lp2 = lp1.ewm(span=self.ema2_span, min_periods=1).mean()
         slow = lp2.shift(1).ewm(span=self.slow_span, min_periods=1).mean()
-        signal = (lp2 - slow).fillna(0.0)
+        smooth_sig = (lp2 - slow).fillna(0.0)
 
-        # Cross-sectional unit-variance scaling + conviction exponent (1.35)
+        # Blend contemporaneous signal with filtered trajectory to cut phase lag on S^18
+        signal = (1.0 - self.raw_blend) * smooth_sig + self.raw_blend * pred_z
+
+        # Cross-sectional unit-variance scaling + moderate conviction exponent (1.15)
         p = signal.sub(signal.mean(axis=1), axis=0).fillna(0.0)
         scale = p.std(axis=1).replace(0.0, np.nan)
         z = p.div(scale, axis=0).fillna(0.0).clip(-3.0, 3.0)
-        target_pos = np.sign(z) * (z.abs() ** 1.35)
+        target_pos = np.sign(z) * (z.abs() ** 1.12)
         target_pos = target_pos.sub(target_pos.mean(axis=1), axis=0).fillna(0.0)
 
         # Clean causal hysteresis no-trade band (stabilizes S^18 trajectory & cuts fee churn)
         arr = np.asarray(target_pos.values, dtype=np.float64)
         n_rows, _ = arr.shape
         held = arr.copy()
-        if n_rows > 1:
+        if n_rows > 2:
             curr = arr[0].copy()
             band = self.trade_band
             for t in range(1, n_rows):
